@@ -194,6 +194,8 @@ enum prison_state {
 #define	JAIL_PARAM_ALLOW_NOSETTIME	"allow.nosettime"
 #define	JAIL_PARAM_ALLOW_ROUTING	"allow.routing"
 #define	JAIL_PARAM_ALLOW_NOROUTING	"allow.norouting"
+#define	JAIL_PARAM_ALLOW_PF		"allow.pf"
+#define	JAIL_PARAM_ALLOW_NOPF		"allow.nopf"
 #define	JAIL_PARAM_ALLOW_UNPRIV_PARENT_TAMPER \
 					"allow.unprivileged_parent_tampering"
 #define	JAIL_PARAM_ALLOW_NOUNPRIV_PARENT_TAMPER \
@@ -366,6 +368,7 @@ struct prison_racct {
 #define	PR_ALLOW_ROUTING		0x00200000
 #define	PR_ALLOW_UNPRIV_PARENT_TAMPER	0x00400000
 #define	PR_ALLOW_SETAUDIT		0x00800000
+#define	PR_ALLOW_PF			0x01000000
 
 /*
  * PR_ALLOW_PRISON0 are the allow flags that we apply by default to prison0,
@@ -380,7 +383,7 @@ struct prison_racct {
      PR_ALLOW_UNPRIV_DEBUG | PR_ALLOW_SUSER | PR_ALLOW_RESERVED_PORTS | \
      PR_ALLOW_KMEM_ACCESS | PR_ALLOW_NFSD | PR_ALLOW_EXTATTR | \
      PR_ALLOW_ADJTIME | PR_ALLOW_SETTIME | PR_ALLOW_ROUTING | \
-     PR_ALLOW_UNPRIV_PARENT_TAMPER | PR_ALLOW_SETAUDIT)
+     PR_ALLOW_UNPRIV_PARENT_TAMPER | PR_ALLOW_SETAUDIT | PR_ALLOW_PF)
 
 #define	PR_ALLOW_PRISON0		\
     (PR_ALLOW_ALL_STATIC & ~(PR_ALLOW_UNPRIV_PARENT_TAMPER))

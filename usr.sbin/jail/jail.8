@@ -731,6 +731,14 @@ This permission includes also
 .It Va allow.routing
 Allow privileged process in the non-VNET jail to modify the system routing
 table.
+.It Va allow.pf
+Allow privileged processes in the non-VNET jail to manage the system
+.Xr pf 4
+firewall, for example with
+.Xr pfctl 8 .
+A VNET jail always manages its own
+.Xr pf 4
+instance and does not need this permission.
 .It Va allow.setaudit
 Allow privileged processes in the jail to set
 .Xr audit 4

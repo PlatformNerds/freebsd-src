@@ -257,6 +257,7 @@ static struct bool_flags pr_flag_allow[NBBY * NBPW] = {
 	 PR_ALLOW_SETTIME},
 	{JAIL_PARAM_ALLOW_ROUTING, JAIL_PARAM_ALLOW_NOROUTING,
 	 PR_ALLOW_ROUTING},
+	{JAIL_PARAM_ALLOW_PF, JAIL_PARAM_ALLOW_NOPF, PR_ALLOW_PF},
 	{JAIL_PARAM_ALLOW_UNPRIV_PARENT_TAMPER,
 	    JAIL_PARAM_ALLOW_NOUNPRIV_PARENT_TAMPER,
 	    PR_ALLOW_UNPRIV_PARENT_TAMPER},
@@ -4512,7 +4513,6 @@ prison_priv_check(struct ucred *cred, int priv)
 		 */
 	case PRIV_NETINET_IPFW:
 	case PRIV_NETINET_DIVERT:
-	case PRIV_NETINET_PF:
 	case PRIV_NETINET_DUMMYNET:
 	case PRIV_NETINET_CARP:
 	case PRIV_NETINET_MROUTE:
@@ -4826,6 +4826,19 @@ prison_priv_check(struct ucred *cred, int priv)
 			return (0);
 		else
 			return (EPERM);
+
+		/*
+		 * A VNET jail manages its own pf instance.  A non-VNET jail
+		 * shares the host network stack and may manage the host pf
+		 * only with allow.pf (e.g. a Kubernetes kube-proxy or network
+		 * policy agent running in a host-network container).
+		 */
+	case PRIV_NETINET_PF:
+		if (cred->cr_prison->pr_flags & PR_VNET)
+			return (0);
+		if (cred->cr_prison->pr_allow & PR_ALLOW_PF)
+			return (0);
+		return (EPERM);
 
 	case PRIV_VMM_CREATE:
 	case PRIV_VMM_DESTROY:
@@ -5325,6 +5338,8 @@ SYSCTL_JAIL_PARAM(_allow, settime, CTLTYPE_INT | CTLFLAG_RW,
     "B", "Jail may set system time");
 SYSCTL_JAIL_PARAM(_allow, routing, CTLTYPE_INT | CTLFLAG_RW,
     "B", "Jail may modify routing table");
+SYSCTL_JAIL_PARAM(_allow, pf, CTLTYPE_INT | CTLFLAG_RW,
+    "B", "Jail may manage the pf firewall without its own vnet");
 #ifdef AUDIT
 SYSCTL_JAIL_PARAM(_allow, setaudit, CTLTYPE_INT | CTLFLAG_RW,
     "B", "Jail may set and get audit session state");
