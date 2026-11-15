@@ -344,6 +344,18 @@ rctl_proc_rule_to_racct(const struct proc *p, const struct rctl_rule *rule)
 	case RCTL_SUBJECT_TYPE_LOGINCLASS:
 		return (cred->cr_loginclass->lc_racct);
 	case RCTL_SUBJECT_TYPE_JAIL:
+		/*
+		 * A rule on a jail limits that jail, whose usage includes
+		 * every jail below it (racct_add_cred()), and it is linked to
+		 * the processes of those jails too.  Compare against the
+		 * rule's jail, not the process's own: that one may be a child
+		 * holding a fraction of the usage.  Other subjects with
+		 * "per jail" (e.g. user:1000:maxproc:deny=10/jail) still mean
+		 * the jail the process is in.
+		 */
+		if (rule->rr_subject_type == RCTL_SUBJECT_TYPE_JAIL &&
+		    rule->rr_subject.rs_prison_racct != NULL)
+			return (rule->rr_subject.rs_prison_racct->prr_racct);
 		return (cred->cr_prison->pr_prison_racct->prr_racct);
 	default:
 		panic("%s: unknown per %d", __func__, rule->rr_per);
@@ -1995,7 +2007,7 @@ rctl_proc_ucred_changed(struct proc *p, struct ucred *newcred)
 	struct rctl_rule_link *link, *newlink;
 	struct uidinfo *newuip;
 	struct loginclass *newlc;
-	struct prison_racct *newprr;
+	struct prison *pr;
 	int rulecnt, i;
 
 	if (!racct_enable)
@@ -2005,7 +2017,6 @@ rctl_proc_ucred_changed(struct proc *p, struct ucred *newcred)
 
 	newuip = newcred->cr_ruidinfo;
 	newlc = newcred->cr_loginclass;
-	newprr = newcred->cr_prison->pr_prison_racct;
 
 	LIST_INIT(&newrules);
 
@@ -2025,8 +2036,18 @@ again:
 		rulecnt++;
 	LIST_FOREACH(link, &newlc->lc_racct->r_rule_links, rrl_next)
 		rulecnt++;
-	LIST_FOREACH(link, &newprr->prr_racct->r_rule_links, rrl_next)
-		rulecnt++;
+	/*
+	 * Jail rules apply to processes in the jail and in all jails below
+	 * it, as in rctl_rule_add() (and racct_add_cred() accounts usage to
+	 * every ancestor jail).  Counting only the process's own jail here
+	 * dropped the ancestors' rules whenever a process entered a child
+	 * jail (jail_attach(2)), so a limit on a parent jail was never
+	 * enforced on processes started in its children.
+	 */
+	for (pr = newcred->cr_prison; pr != NULL; pr = pr->pr_parent)
+		LIST_FOREACH(link, &pr->pr_prison_racct->prr_racct->r_rule_links,
+		    rrl_next)
+			rulecnt++;
 	RACCT_UNLOCK();
 
 	/*
@@ -2079,14 +2100,17 @@ again:
 		rulecnt--;
 	}
 
-	LIST_FOREACH(link, &newprr->prr_racct->r_rule_links, rrl_next) {
-		if (newlink == NULL)
-			goto goaround;
-		rctl_rule_acquire(link->rrl_rule);
-		newlink->rrl_rule = link->rrl_rule;
-		newlink->rrl_exceeded = link->rrl_exceeded;
-		newlink = LIST_NEXT(newlink, rrl_next);
-		rulecnt--;
+	for (pr = newcred->cr_prison; pr != NULL; pr = pr->pr_parent) {
+		LIST_FOREACH(link, &pr->pr_prison_racct->prr_racct->r_rule_links,
+		    rrl_next) {
+			if (newlink == NULL)
+				goto goaround;
+			rctl_rule_acquire(link->rrl_rule);
+			newlink->rrl_rule = link->rrl_rule;
+			newlink->rrl_exceeded = link->rrl_exceeded;
+			newlink = LIST_NEXT(newlink, rrl_next);
+			rulecnt--;
+		}
 	}
 
 	if (rulecnt == 0) {
