@@ -64,6 +64,14 @@
 #endif
 
 FEATURE(rctl, "Resource Limits");
+/*
+ * Jail rules are enforced on processes in child jails too.  Lets userland
+ * (e.g. container runtimes putting a pod's limits on a parent jail) tell
+ * this apart from kernels where such a rule only applies to processes in the
+ * jail itself while counting its children's usage: there, a memoryuse:sigkill
+ * rule on the parent would kill the parent jail's own processes.
+ */
+FEATURE(rctl_jail_hierarchy, "Resource limits on a jail apply to its child jails");
 
 #define	HRF_DEFAULT		0
 #define	HRF_DONT_INHERIT	1
