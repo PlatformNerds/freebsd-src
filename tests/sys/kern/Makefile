@@ -89,6 +89,7 @@ ATF_TESTS_C+=	vn_io_fault1
 ATF_TESTS_SH+=	coredump_phnum_test
 ATF_TESTS_SH+=	logsigexit_test
 ATF_TESTS_SH+=	jailmeta
+ATF_TESTS_SH+=	rctl_jail_hierarchy
 ATF_TESTS_SH+=	sonewconn_overflow
 TEST_METADATA.sonewconn_overflow+=	required_programs="python"
 TEST_METADATA.sonewconn_overflow+=	required_user="root"
