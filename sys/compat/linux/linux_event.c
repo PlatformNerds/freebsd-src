@@ -291,7 +291,7 @@ linux_epoll_ctl(struct thread *td, struct linux_epoll_ctl_args *args)
 	struct epoll_event le;
 	cap_rights_t rights;
 	int nchanges = 0;
-	int error;
+	int error, i, registered;
 
 	if (args->op != LINUX_EPOLL_CTL_DEL) {
 		error = copyin(args->event, &le, sizeof(le));
@@ -372,7 +372,28 @@ linux_epoll_ctl(struct thread *td, struct linux_epoll_ctl_args *args)
 		goto leave0;
 	}
 
-	error = kern_kevent_fp(td, epfp, nchanges, 0, &k_ops, NULL);
+	/*
+	 * Register each filter on its own.  Linux accepts any event mask for a
+	 * pollable file and never reports events the file cannot produce,
+	 * e.g. EPOLLOUT on an inotify or timerfd descriptor.  Their FreeBSD
+	 * kqfilters reject EVFILT_WRITE with EINVAL, which used to fail the
+	 * whole call.  Go's netpoller registers every descriptor for
+	 * EPOLLIN|EPOLLOUT, so such files were not pollable and reads on them
+	 * returned EAGAIN (e.g. fsnotify).  Skip filters the file does not
+	 * support as long as one of them was registered.
+	 */
+	registered = 0;
+	for (i = 0; i < nchanges; i++) {
+		error = kern_kevent_fp(td, epfp, 1, 0, &k_ops, NULL);
+		if (error == 0)
+			registered++;
+		else if (error != EINVAL)
+			break;
+	}
+	if (error == EINVAL && registered > 0)
+		error = 0;
+	else if (error != 0 && registered > 0)
+		(void)epoll_delete_all_events(td, epfp, args->fd);
 
 leave0:
 	fdrop(fp, td);
