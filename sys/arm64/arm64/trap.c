@@ -790,6 +790,17 @@ do_el0_sync(struct thread *td, struct trapframe *frame)
 		call_trapsignal(td, SIGILL, ILL_ILLOPN, (void *)frame->tf_elr,
 		    exception);
 		break;
+	case EXCP_SME:
+		/*
+		 * SME is not supported, so its instructions trap.  Treat them
+		 * like undefined instructions (as Linux does without SME):
+		 * code that probes for SME by executing an instruction, such
+		 * as OpenSSL's capability detection, expects SIGILL and dies
+		 * on the SIGBUS of the default case on CPUs that have SME.
+		 */
+		call_trapsignal(td, SIGILL, ILL_ILLTRP, (void *)frame->tf_elr,
+		    exception);
+		break;
 	case EXCP_SP_ALIGN:
 		call_trapsignal(td, SIGBUS, BUS_ADRALN, (void *)frame->tf_sp,
 		    exception);
