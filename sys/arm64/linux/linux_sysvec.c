@@ -597,15 +597,34 @@ static const Elf64_Brandinfo linux_glibc2brand = {
 	.brand		= ELFOSABI_LINUX,
 	.machine	= EM_AARCH64,
 	.compat_3_brand	= "Linux",
-	.interp_path	= "/lib64/ld-linux-x86-64.so.2",
+	.interp_path	= "/lib/ld-linux-aarch64.so.1",
 	.sysvec		= &elf_linux_sysvec,
 	.interp_newpath	= NULL,
 	.brand_note	= &linux64_brandnote,
 	.flags		= BI_CAN_EXEC_DYN | BI_BRAND_NOTE
 };
 
+/*
+ * musl uses FUTEX_REQUEUE (e.g. in its condition variables); without this
+ * brand, Alpine binaries only ran through kern.elf64.fallback_brand, as
+ * plain Linux binaries, got EINVAL for it and lost wakeups (Node.js hung
+ * joining its threads at exit).
+ */
+static const Elf64_Brandinfo linux_muslbrand = {
+	.brand		= ELFOSABI_LINUX,
+	.machine	= EM_AARCH64,
+	.compat_3_brand	= "Linux",
+	.interp_path	= "/lib/ld-musl-aarch64.so.1",
+	.sysvec		= &elf_linux_sysvec,
+	.interp_newpath	= NULL,
+	.brand_note	= &linux64_brandnote,
+	.flags		= BI_CAN_EXEC_DYN | BI_BRAND_NOTE |
+			    LINUX_BI_FUTEX_REQUEUE
+};
+
 const Elf64_Brandinfo *linux_brandlist[] = {
 	&linux_glibc2brand,
+	&linux_muslbrand,
 	NULL
 };
 
