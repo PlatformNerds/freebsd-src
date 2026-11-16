@@ -11237,6 +11237,24 @@ done:
 	    pf_is_loopback(af, pd.dst))
 		pd.m->m_flags |= M_SKIP_FIREWALL;
 
+#ifdef INET
+	/*
+	 * A connection this host made to one of its own addresses that an
+	 * outbound rule redirected to another host (e.g. "pass out on lo0 ...
+	 * rdr-to <container>" for a service published on the host's address):
+	 * the reverse translation of the replies restores the host's own
+	 * address as their source, and they arrive on a non-loopback
+	 * interface, so ip_input()'s source address validation drops them as
+	 * spoofed (net.inet.ip.source_address_validation).  They match a state
+	 * created by this host's own outbound packet, so deliver them locally.
+	 */
+	if (dir == PF_IN && action == PF_PASS && af == AF_INET && s != NULL &&
+	    s->direction == PF_OUT &&
+	    s->key[PF_SK_WIRE] != s->key[PF_SK_STACK] &&
+	    in_localip(pd.src->v4) && in_localip(pd.dst->v4))
+		pd.m->m_flags |= M_FASTFWD_OURS;
+#endif
+
 	if (action == PF_PASS && r->divert.port && !PACKET_LOOPED(&pd)) {
 		mtag = m_tag_alloc(MTAG_PF_DIVERT, 0,
 		    sizeof(struct pf_divert_mtag), M_NOWAIT | M_ZERO);
