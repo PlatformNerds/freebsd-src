@@ -186,6 +186,8 @@ void	racct_sub(struct proc *p, int resource, uint64_t amount);
 void	racct_sub_cred(struct ucred *cred, int resource, uint64_t amount);
 uint64_t	racct_get_limit(struct proc *p, int resource);
 uint64_t	racct_get_available(struct proc *p, int resource);
+uint64_t	racct_get_jail_limit(struct proc *p, int resource);
+uint64_t	racct_get_jail_usage(struct ucred *cred, int resource);
 
 void	racct_create(struct racct **racctp);
 void	racct_destroy(struct racct **racctp);
@@ -255,6 +257,20 @@ racct_get_available(struct proc *p, int resource)
 {
 
 	return (UINT64_MAX);
+}
+
+static inline uint64_t
+racct_get_jail_limit(struct proc *p, int resource)
+{
+
+	return (UINT64_MAX);
+}
+
+static inline uint64_t
+racct_get_jail_usage(struct ucred *cred, int resource)
+{
+
+	return (0);
 }
 
 #define	racct_create(x)

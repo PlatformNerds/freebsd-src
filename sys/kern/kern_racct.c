@@ -615,6 +615,55 @@ racct_get_available(struct proc *p, int resource)
 }
 
 /*
+ * Returns the lowest limit that the rules of process 'p''s jail (and, with
+ * hierarchical jail rules, of its ancestors) put on 'resource', whatever
+ * their enforcing action; UINT64_MAX if none.  In the resource's internal
+ * units (see RACCT_IN_MILLIONS).
+ */
+uint64_t
+racct_get_jail_limit(struct proc *p, int resource)
+{
+#ifdef RCTL
+	uint64_t limit;
+
+	if (!racct_enable)
+		return (UINT64_MAX);
+
+	RACCT_LOCK();
+	limit = rctl_get_jail_limit(p, resource);
+	RACCT_UNLOCK();
+
+	return (limit);
+#else
+
+	return (UINT64_MAX);
+#endif
+}
+
+/*
+ * Returns the current usage of 'resource' by the jail of 'cred', in the
+ * resource's internal units.
+ */
+uint64_t
+racct_get_jail_usage(struct ucred *cred, int resource)
+{
+	struct prison_racct *prr;
+	int64_t amount;
+
+	if (!racct_enable)
+		return (0);
+
+	prr = cred->cr_prison->pr_prison_racct;
+	if (prr == NULL)
+		return (0);
+	RACCT_LOCK();
+	amount = prr->prr_racct->r_resources[resource];
+	RACCT_UNLOCK();
+
+	return (amount < 0 ? 0 : amount);
+}
+
+/*
  * Returns amount of the %cpu resource that process 'p' can add to its %cpu
  * utilization.  Adding more than that would lead to the process being
  * throttled.

@@ -721,6 +721,42 @@ rctl_get_limit(struct proc *p, int resource)
 	return (amount);
 }
 
+/*
+ * Return the lowest limit that an enforcing rule (deny or a signal) of the
+ * jail of process 'p' puts on 'resource', or UINT64_MAX if there is none.
+ * With hierarchical jail rules, processes are also linked to the rules of
+ * their jail's ancestors, so this is the effective limit of a container
+ * inside a pod.  Used to show a process its container's limits (the
+ * Linuxulator's cgroup v2 view).
+ */
+uint64_t
+rctl_get_jail_limit(struct proc *p, int resource)
+{
+	struct rctl_rule *rule;
+	struct rctl_rule_link *link;
+	uint64_t amount = UINT64_MAX;
+
+	ASSERT_RACCT_ENABLED();
+	RACCT_LOCK_ASSERT();
+
+	LIST_FOREACH(link, &p->p_racct->r_rule_links, rrl_next) {
+		rule = link->rrl_rule;
+		if (rule->rr_resource != resource)
+			continue;
+		if (rule->rr_subject_type != RCTL_SUBJECT_TYPE_JAIL ||
+		    rule->rr_per != RCTL_SUBJECT_TYPE_JAIL)
+			continue;
+		if (rule->rr_action != RCTL_ACTION_DENY &&
+		    (rule->rr_action < 0 ||
+		    rule->rr_action > RCTL_ACTION_SIGNAL_MAX))
+			continue;
+		if (rule->rr_amount >= 0 && (uint64_t)rule->rr_amount < amount)
+			amount = rule->rr_amount;
+	}
+
+	return (amount);
+}
+
 uint64_t
 rctl_get_available(struct proc *p, int resource)
 {
