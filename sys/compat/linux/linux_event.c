@@ -322,6 +322,26 @@ linux_epoll_ctl(struct thread *td, struct linux_epoll_ctl_args *args)
 
 	ciargs.changelist = kev;
 
+	/*
+	 * EPOLLEXCLUSIVE asks to wake only one of several epoll instances
+	 * waiting for the same file (e.g. one listening socket polled by
+	 * every worker process of nginx), to avoid a thundering herd.  Every
+	 * instance is woken here instead, which is correct but slower: the
+	 * others find nothing to do (accept(2) on a non-blocking socket
+	 * returns EAGAIN).  Like Linux, it is only accepted with
+	 * EPOLL_CTL_ADD and not with EPOLLONESHOT.  Rejecting it made nginx's
+	 * worker processes exit at startup.
+	 */
+	if (args->op != LINUX_EPOLL_CTL_DEL &&
+	    (le.events & LINUX_EPOLLEXCLUSIVE) != 0) {
+		if (args->op != LINUX_EPOLL_CTL_ADD ||
+		    (le.events & LINUX_EPOLLONESHOT) != 0) {
+			error = EINVAL;
+			goto leave0;
+		}
+		le.events &= ~LINUX_EPOLLEXCLUSIVE;
+	}
+
 	if (args->op != LINUX_EPOLL_CTL_DEL) {
 		error = epoll_to_kevent(td, args->fd, &le, kev, &nchanges);
 		if (error != 0)
