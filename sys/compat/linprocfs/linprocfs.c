@@ -472,7 +472,9 @@ _mtab_helper(const struct pfs_node *pn, const struct statfs *sp,
 			*mntfrom += 4;
 	}
 
-	if (strcmp(*fstype, "linsysfs") == 0) {
+	if (strcmp(*fstype, "lincgroupfs") == 0) {
+		*mntfrom = *fstype = "cgroup2";
+	} else if (strcmp(*fstype, "linsysfs") == 0) {
 		*mntfrom = *fstype = "sysfs";
 	} else {
 		/* For Linux msdosfs is called vfat */
@@ -558,6 +560,34 @@ out:
 	free(buf, M_TEMP);
 	free(flep, M_TEMP);
 	return (error);
+}
+
+/*
+ * Filler function for proc/pid/cgroup: every process is at the root of its
+ * container's cgroup v2 hierarchy (lincgroupfs, see linsysfs.c).
+ */
+static int
+linprocfs_doproccgroup(PFS_FILL_ARGS)
+{
+
+	sbuf_cat(sb, "0::/\n");
+	return (0);
+}
+
+/*
+ * Filler function for proc/cgroups: hierarchy 0 for every controller means
+ * cgroup v2 (unified), which is what lincgroupfs provides.
+ */
+static int
+linprocfs_docgroups(PFS_FILL_ARGS)
+{
+	static const char *controllers[] = { "cpuset", "cpu", "cpuacct",
+	    "memory", "pids" };
+
+	sbuf_cat(sb, "#subsys_name\thierarchy\tnum_cgroups\tenabled\n");
+	for (size_t i = 0; i < nitems(controllers); i++)
+		sbuf_printf(sb, "%s\t0\t1\t1\n", controllers[i]);
+	return (0);
 }
 
 static int
@@ -2508,6 +2538,8 @@ linprocfs_init(PFS_INIT_ARGS)
 	/* /proc/... */
 	pfs_create_file(root, NULL, "cmdline", &linprocfs_docmdline, NULL, NULL,
 	    NULL, PFS_RD);
+	pfs_create_file(root, NULL, "cgroups", &linprocfs_docgroups, NULL, NULL,
+	    NULL, PFS_RD);
 	pfs_create_file(root, NULL, "cpuinfo", &linprocfs_docpuinfo, NULL, NULL,
 	    NULL, PFS_RD);
 	pfs_create_file(root, NULL, "devices", &linprocfs_dodevices, NULL, NULL,
@@ -2551,6 +2583,8 @@ linprocfs_init(PFS_INIT_ARGS)
 
 	/* /proc/<pid>/... */
 	pfs_create_dir(root, &dir, "pid", NULL, NULL, NULL, PFS_PROCDEP);
+	pfs_create_file(dir, NULL, "cgroup", &linprocfs_doproccgroup, NULL,
+	    NULL, NULL, PFS_RD);
 	pfs_create_file(dir, NULL, "cmdline", &linprocfs_doproccmdline, NULL,
 	    NULL, NULL, PFS_RD);
 	pfs_create_link(dir, NULL, "cwd", &linprocfs_doproccwd, NULL, NULL,

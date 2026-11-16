@@ -342,6 +342,7 @@ struct l_statfs {
 #define	LINUX_DEVFS_SUPER_MAGIC	0x1373L
 #define	LINUX_SHMFS_MAGIC	0x01021994
 #define	LINUX_SYSFS_MAGIC	0x62656572
+#define	LINUX_CGROUP2_SUPER_MAGIC	0x63677270
 
 static long
 bsd_to_linux_ftype(const char *fstypename)
@@ -362,6 +363,7 @@ bsd_to_linux_ftype(const char *fstypename)
 		{"devfs",    LINUX_DEVFS_SUPER_MAGIC},
 		{"tmpfs",    LINUX_SHMFS_MAGIC},
 		{"linsysfs", LINUX_SYSFS_MAGIC},
+		{"lincgroupfs", LINUX_CGROUP2_SUPER_MAGIC},
 		{NULL,       0L}};
 
 	for (i = 0; b2l_tbl[i].bsd_name != NULL; i++)

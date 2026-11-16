@@ -34,6 +34,8 @@
 #include <sys/mount.h>
 #include <sys/sbuf.h>
 #include <sys/smp.h>
+#include <sys/proc.h>
+#include <sys/racct.h>
 #include <sys/bus.h>
 #include <sys/pciio.h>
 
@@ -545,6 +547,217 @@ linsysfs_listcpus(struct pfs_node *dir)
 /*
  * Constructor
  */
+/*
+ * lincgroupfs: a read-only cgroup v2 view of the limits FreeBSD enforces
+ * on the reading process's jail with rctl(8), so that Linux programs in a
+ * container size themselves to it (JVM heap, Go GOMAXPROCS, .NET GC, Node
+ * heap) instead of to the whole host.  Each file is computed for the reader,
+ * like a cgroup namespace whose root is the container's cgroup.  It is its
+ * own file system (mounted on /sys/fs/cgroup, a directory linsysfs provides)
+ * so that statfs(2) can report the cgroup2 magic and mountinfo the cgroup2
+ * type, which is how the JVM and .NET recognize cgroup v2; linprocfs reports
+ * the matching "0::/" in /proc/<pid>/cgroup.
+ *
+ *	memory.max	memoryuse rule (deny or signal), or "max"
+ *	memory.current	the jail's resident memory (racct memoryuse)
+ *	cpu.max		pcpu rule as "<quota> <period>" (percent of one CPU)
+ *	pids.max	maxproc rule
+ *	cpu.stat	usage_usec from the jail's cputime
+ *
+ * Limits are the lowest of the jail's and its ancestors' rules (with
+ * hierarchical jail rules, a pod's limit applies to its containers).
+ */
+#define	LINSYSFS_CG_PERIOD	100000	/* cpu.max period, microseconds */
+
+static uint64_t
+linsysfs_cg_limit(struct thread *td, int resource)
+{
+
+	return (racct_get_jail_limit(td->td_proc, resource));
+}
+
+static uint64_t
+linsysfs_cg_usage(struct thread *td, int resource)
+{
+
+	return (racct_get_jail_usage(td->td_ucred, resource));
+}
+
+static void
+linsysfs_cg_print(struct sbuf *sb, uint64_t v)
+{
+
+	if (v == UINT64_MAX)
+		sbuf_cat(sb, "max\n");
+	else
+		sbuf_printf(sb, "%ju\n", (uintmax_t)v);
+}
+
+static int
+linsysfs_cg_controllers(PFS_FILL_ARGS)
+{
+
+	sbuf_cat(sb, "cpuset cpu memory pids\n");
+	return (0);
+}
+
+static int
+linsysfs_cg_empty(PFS_FILL_ARGS)
+{
+
+	sbuf_cat(sb, "\n");
+	return (0);
+}
+
+static int
+linsysfs_cg_zero(PFS_FILL_ARGS)
+{
+
+	sbuf_cat(sb, "0\n");
+	return (0);
+}
+
+static int
+linsysfs_cg_unlimited(PFS_FILL_ARGS)
+{
+
+	sbuf_cat(sb, "max\n");
+	return (0);
+}
+
+static int
+linsysfs_cg_memory_max(PFS_FILL_ARGS)
+{
+
+	linsysfs_cg_print(sb, linsysfs_cg_limit(td, RACCT_RSS));
+	return (0);
+}
+
+static int
+linsysfs_cg_memory_current(PFS_FILL_ARGS)
+{
+
+	sbuf_printf(sb, "%ju\n", (uintmax_t)linsysfs_cg_usage(td, RACCT_RSS));
+	return (0);
+}
+
+static int
+linsysfs_cg_memory_stat(PFS_FILL_ARGS)
+{
+	uint64_t rss;
+
+	/* Only the resident total is known; report it as anonymous memory. */
+	rss = linsysfs_cg_usage(td, RACCT_RSS);
+	sbuf_printf(sb, "anon %ju\nfile 0\nkernel 0\nshmem 0\nsock 0\n",
+	    (uintmax_t)rss);
+	return (0);
+}
+
+static int
+linsysfs_cg_cpu_max(PFS_FILL_ARGS)
+{
+	uint64_t pct;
+
+	/* pcpu is in millionths of a percent of one CPU. */
+	pct = linsysfs_cg_limit(td, RACCT_PCTCPU);
+	if (pct == UINT64_MAX)
+		sbuf_printf(sb, "max %d\n", LINSYSFS_CG_PERIOD);
+	else
+		sbuf_printf(sb, "%ju %d\n",
+		    (uintmax_t)MAX(pct / 1000000 * (LINSYSFS_CG_PERIOD / 100),
+		    1000), LINSYSFS_CG_PERIOD);
+	return (0);
+}
+
+static int
+linsysfs_cg_cpu_weight(PFS_FILL_ARGS)
+{
+
+	/* FreeBSD has no CPU weights; report the default. */
+	sbuf_cat(sb, "100\n");
+	return (0);
+}
+
+static int
+linsysfs_cg_cpu_stat(PFS_FILL_ARGS)
+{
+	uint64_t usec;
+
+	/* cputime is in millionths of a second. */
+	usec = linsysfs_cg_usage(td, RACCT_CPU);
+	sbuf_printf(sb, "usage_usec %ju\nuser_usec 0\nsystem_usec 0\n"
+	    "nr_periods 0\nnr_throttled 0\nthrottled_usec 0\n",
+	    (uintmax_t)usec);
+	return (0);
+}
+
+static int
+linsysfs_cg_cpuset_cpus(PFS_FILL_ARGS)
+{
+
+	if (mp_ncpus > 1)
+		sbuf_printf(sb, "0-%d\n", mp_ncpus - 1);
+	else
+		sbuf_cat(sb, "0\n");
+	return (0);
+}
+
+static int
+linsysfs_cg_pids_max(PFS_FILL_ARGS)
+{
+
+	linsysfs_cg_print(sb, linsysfs_cg_limit(td, RACCT_NPROC));
+	return (0);
+}
+
+static int
+linsysfs_cg_pids_current(PFS_FILL_ARGS)
+{
+
+	sbuf_printf(sb, "%ju\n", (uintmax_t)linsysfs_cg_usage(td, RACCT_NPROC));
+	return (0);
+}
+
+static int
+lincgroupfs_init(PFS_INIT_ARGS)
+{
+	static const struct {
+		const char *name;
+		pfs_fill_t fill;
+	} files[] = {
+		{ "cgroup.controllers",		linsysfs_cg_controllers },
+		{ "cgroup.subtree_control",	linsysfs_cg_empty },
+		{ "cgroup.procs",		linsysfs_cg_empty },
+		{ "memory.max",			linsysfs_cg_memory_max },
+		{ "memory.high",		linsysfs_cg_unlimited },
+		{ "memory.low",			linsysfs_cg_zero },
+		{ "memory.min",			linsysfs_cg_zero },
+		{ "memory.swap.max",		linsysfs_cg_zero },
+		{ "memory.swap.current",	linsysfs_cg_zero },
+		{ "memory.current",		linsysfs_cg_memory_current },
+		{ "memory.stat",		linsysfs_cg_memory_stat },
+		{ "cpu.max",			linsysfs_cg_cpu_max },
+		{ "cpu.weight",			linsysfs_cg_cpu_weight },
+		{ "cpu.stat",			linsysfs_cg_cpu_stat },
+		{ "cpuset.cpus.effective",	linsysfs_cg_cpuset_cpus },
+		{ "cpuset.mems.effective",	linsysfs_cg_zero },
+		{ "pids.max",			linsysfs_cg_pids_max },
+		{ "pids.current",		linsysfs_cg_pids_current },
+	};
+
+	for (size_t i = 0; i < nitems(files); i++)
+		pfs_create_file(pi->pi_root, NULL, files[i].name, files[i].fill,
+		    NULL, NULL, NULL, PFS_RD);
+	return (0);
+}
+
+static int
+lincgroupfs_uninit(PFS_INIT_ARGS)
+{
+
+	return (0);
+}
+
 static int
 linsysfs_init(PFS_INIT_ARGS)
 {
@@ -610,6 +823,10 @@ linsysfs_init(PFS_INIT_ARGS)
 
 	linsysfs_listcpus(cpu);
 
+	/* /sys/fs/cgroup: mount point for lincgroupfs */
+	pfs_create_dir(root, &dir, "fs", NULL, NULL, NULL, 0);
+	pfs_create_dir(dir, NULL, "cgroup", NULL, NULL, NULL, 0);
+
 	/* /sys/kernel */
 	pfs_create_dir(root, &kernel, "kernel", NULL, NULL, NULL, 0);
 	/* /sys/kernel/debug, mountpoint for lindebugfs. */
@@ -641,6 +858,8 @@ linsysfs_uninit(PFS_INIT_ARGS)
 }
 
 PSEUDOFS(linsysfs, 1, VFCF_JAIL);
+PSEUDOFS(lincgroupfs, 1, VFCF_JAIL);
+FEATURE(linux_cgroupfs, "Linux cgroup v2 view of jail limits (lincgroupfs)");
 #if defined(__aarch64__) || defined(__amd64__)
 MODULE_DEPEND(linsysfs, linux_common, 1, 1, 1);
 #else

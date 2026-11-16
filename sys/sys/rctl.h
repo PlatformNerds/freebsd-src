@@ -143,6 +143,7 @@ int	rctl_enforce(struct proc *p, int resource, uint64_t amount);
 void	rctl_throttle_decay(struct racct *racct, int resource);
 int64_t	rctl_pcpu_available(const struct proc *p);
 uint64_t rctl_get_limit(struct proc *p, int resource);
+uint64_t rctl_get_jail_limit(struct proc *p, int resource);
 uint64_t rctl_get_available(struct proc *p, int resource);
 const char *rctl_resource_name(int resource);
 void	rctl_proc_ucred_changed(struct proc *p, struct ucred *newcred);
