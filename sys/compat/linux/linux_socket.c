@@ -2319,7 +2319,6 @@ linux_sockopt_copyout(struct thread *td, void *val, socklen_t len,
 {
 	int error;
 	l_int loptlen;
-	socklen_t optlen;
 
 	error = copyin(PTRIN(args->optlen), &loptlen, sizeof(loptlen));
 	if (error != 0)
@@ -2327,8 +2326,12 @@ linux_sockopt_copyout(struct thread *td, void *val, socklen_t len,
 	if (loptlen < 0)
 		return (EINVAL);
 
-	optlen = (socklen_t)loptlen;
-	error = copyout(val, PTRIN(args->optval), min(len, optlen));
+	/*
+	 * Like Linux, copy out at most the caller's buffer size and report
+	 * the number of bytes actually copied.
+	 */
+	len = min(len, (socklen_t)loptlen);
+	error = copyout(val, PTRIN(args->optval), len);
 	if (error == 0) {
 		loptlen = (l_int)len;
 		error = copyout(&loptlen, PTRIN(args->optlen), sizeof(loptlen));
@@ -2442,7 +2445,7 @@ linux_getsockopt_tcp_info(struct thread *td,
 	/* Eqivalent */
 	l_tinfo.tcpi_total_retrans = tinfo.tcpi_snd_rexmitpack;
 
-	return (linux_sockopt_copyout(td, &l_tinfo, len, args));
+	return (linux_sockopt_copyout(td, &l_tinfo, sizeof(l_tinfo), args));
 }
 
 int
