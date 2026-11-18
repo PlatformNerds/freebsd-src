@@ -36,7 +36,9 @@
 #include <sys/mutex.h>
 #include <sys/namei.h>
 #include <sys/proc.h>
+#include <sys/mount.h>
 #include <sys/stat.h>
+#include <sys/sx.h>
 #include <sys/syscallsubr.h>
 #include <sys/tty.h>
 #include <sys/vnode.h>
@@ -298,8 +300,10 @@ struct l_statfs {
 #define	LINUX_SYSFS_MAGIC	0x62656572
 
 static long
-bsd_to_linux_ftype(const char *fstypename)
+bsd_to_linux_ftype(const struct statfs *sf)
 {
+	char fstypename[MFSNAMELEN];
+	struct vfsconf *vfsp;
 	int i;
 	static struct {const char *bsd_name; long linux_type;} b2l_tbl[] = {
 		{"ufs",      LINUX_UFS_SUPER_MAGIC},
@@ -308,6 +312,7 @@ bsd_to_linux_ftype(const char *fstypename)
 		{"nfs",      LINUX_NFS_SUPER_MAGIC},
 		{"ext2fs",   LINUX_EXT2_SUPER_MAGIC},
 		{"procfs",   LINUX_PROC_SUPER_MAGIC},
+		{"linprocfs", LINUX_PROC_SUPER_MAGIC},
 		{"msdosfs",  LINUX_MSDOS_SUPER_MAGIC},
 		{"ntfs",     LINUX_NTFS_SUPER_MAGIC},
 		{"nwfs",     LINUX_NCP_SUPER_MAGIC},
@@ -317,6 +322,24 @@ bsd_to_linux_ftype(const char *fstypename)
 		{"tmpfs",    LINUX_SHMFS_MAGIC},
 		{"linsysfs", LINUX_SYSFS_MAGIC},
 		{NULL,       0L}};
+
+	strlcpy(fstypename, sf->f_fstypename, sizeof(fstypename));
+	/*
+	 * nullfs is FreeBSD's bind mount. Linux reports the filesystem
+	 * behind a bind mount, so report the one below nullfs: nullfs passes
+	 * its type number through.
+	 */
+	if (strcmp(fstypename, "nullfs") == 0) {
+		vfsconf_slock();
+		TAILQ_FOREACH(vfsp, &vfsconf, vfc_list) {
+			if (vfsp->vfc_typenum == sf->f_type) {
+				strlcpy(fstypename, vfsp->vfc_name,
+				    sizeof(fstypename));
+				break;
+			}
+		}
+		vfsconf_sunlock();
+	}
 
 	for (i = 0; b2l_tbl[i].bsd_name != NULL; i++)
 		if (strcmp(b2l_tbl[i].bsd_name, fstypename) == 0)
@@ -353,7 +376,7 @@ bsd_to_linux_statfs(struct statfs *bsd_statfs, struct l_statfs *linux_statfs)
 #if defined(__i386__) || (defined(__amd64__) && defined(COMPAT_LINUX32))
 	statfs_scale_blocks(bsd_statfs, INT32_MAX);
 #endif
-	linux_statfs->f_type = bsd_to_linux_ftype(bsd_statfs->f_fstypename);
+	linux_statfs->f_type = bsd_to_linux_ftype(bsd_statfs);
 	linux_statfs->f_bsize = bsd_statfs->f_bsize;
 	linux_statfs->f_blocks = bsd_statfs->f_blocks;
 	linux_statfs->f_bfree = bsd_statfs->f_bfree;
@@ -397,7 +420,7 @@ static void
 bsd_to_linux_statfs64(struct statfs *bsd_statfs, struct l_statfs64 *linux_statfs)
 {
 
-	linux_statfs->f_type = bsd_to_linux_ftype(bsd_statfs->f_fstypename);
+	linux_statfs->f_type = bsd_to_linux_ftype(bsd_statfs);
 	linux_statfs->f_bsize = bsd_statfs->f_bsize;
 	linux_statfs->f_blocks = bsd_statfs->f_blocks;
 	linux_statfs->f_bfree = bsd_statfs->f_bfree;
