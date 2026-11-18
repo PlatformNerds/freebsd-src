@@ -661,10 +661,14 @@ linux_to_bsd_sockaddr(const struct l_sockaddr *osa, struct sockaddr **sap,
 		name = ((struct sockaddr_un *)kosa)->sun_path;
 		if (*name == '\0') {
 			/*
-			 * Linux abstract namespace starts with a NULL byte.
-			 * XXX We do not support abstract namespace yet.
+			 * Linux abstract namespace starts with a NUL byte and
+			 * the name is all of the remaining bytes.  Linux's
+			 * sun_path is longer than ours, so a name padded to
+			 * sizeof(struct sockaddr_un) loses its trailing NULs.
 			 */
-			namelen = strnlen(name + 1, salen - hdrlen - 1) + 1;
+			namelen = salen - hdrlen;
+			while (namelen > 1 && name[namelen - 1] == '\0')
+				namelen--;
 		} else
 			namelen = strnlen(name, salen - hdrlen);
 		salen = hdrlen + namelen;

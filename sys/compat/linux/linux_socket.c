@@ -952,6 +952,30 @@ linux_socket(struct thread *td, struct linux_socket_args *args)
 	return (retval_socket);
 }
 
+/*
+ * Linux binds an AF_UNIX socket given only the address family to a unique
+ * abstract name of five hex digits.
+ */
+static int
+linux_unix_autobind(struct thread *td, int s)
+{
+	static u_int ordernum;
+	struct sockaddr_un sun;
+	u_int tries;
+	int error;
+
+	error = EADDRINUSE;
+	for (tries = 0; tries <= 0xfffff && error == EADDRINUSE; tries++) {
+		memset(&sun, 0, sizeof(sun));
+		sun.sun_family = AF_UNIX;
+		snprintf(sun.sun_path + 1, sizeof(sun.sun_path) - 1, "%05x",
+		    atomic_fetchadd_int(&ordernum, 1) & 0xfffff);
+		sun.sun_len = offsetof(struct sockaddr_un, sun_path) + 6;
+		error = kern_bindat(td, AT_FDCWD, s, (struct sockaddr *)&sun);
+	}
+	return (error);
+}
+
 int
 linux_bind(struct thread *td, struct linux_bind_args *args)
 {
@@ -963,6 +987,11 @@ linux_bind(struct thread *td, struct linux_bind_args *args)
 	if (error != 0)
 		return (error);
 
+	if (sa->sa_family == AF_UNIX &&
+	    sa->sa_len == offsetof(struct sockaddr_un, sun_path)) {
+		free(sa, M_SONAME);
+		return (linux_unix_autobind(td, args->s));
+	}
 	error = kern_bindat(td, AT_FDCWD, args->s, sa);
 	free(sa, M_SONAME);
 
