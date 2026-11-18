@@ -494,7 +494,19 @@ _rm_unlock_hard(struct thread *td,struct rm_priotracker *tracker)
 
 		ts = turnstile_lookup(&rm->lock_object);
 
-		turnstile_signal(ts, TS_EXCLUSIVE_QUEUE);
+		/*
+		 * Wake every waiter, not just one. The writer waiting for
+		 * this reader is not the only thread that can be on the
+		 * turnstile: epoch_block_handler_preempt() puts threads
+		 * waiting for an epoch to drain on the turnstile of the lock
+		 * an epoch reader is blocked on, here the writer's (e.g.
+		 * pf's rules lock, write-locked inside the net epoch). With
+		 * turnstile_signal() only one of them woke; the others slept
+		 * on an ownerless turnstile forever, holding whatever they
+		 * held (ifnet_sx, ifnet_detach_sx). Every waiter rechecks its
+		 * condition: the writer loops while readers remain.
+		 */
+		turnstile_broadcast(ts, TS_EXCLUSIVE_QUEUE);
 		turnstile_unpend(ts);
 		turnstile_chain_unlock(&rm->lock_object);
 	} else
