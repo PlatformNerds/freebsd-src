@@ -239,21 +239,22 @@ linux_futex(struct thread *td, struct linux_futex_args *args)
 		 * Glibc versions prior to 2.3.3 fall back to FUTEX_WAKE when
 		 * FUTEX_REQUEUE returned EINVAL.
 		 */
-		pem = pem_find(td->td_proc);
-		if ((pem->flags & LINUX_XDEPR_REQUEUEOP) == 0) {
-			linux_msg(td, "unsupported FUTEX_REQUEUE");
-			pem->flags |= LINUX_XDEPR_REQUEUEOP;
-		}
-
 		/*
 		 * The above is true, however musl libc does make use of the
 		 * futex requeue operation, allow operation for brands which
-		 * set LINUX_BI_FUTEX_REQUEUE bit of Brandinfo flags.
+		 * set LINUX_BI_FUTEX_REQUEUE bit of Brandinfo flags.  Only
+		 * report the operation as unsupported where it is rejected.
 		 */
 		p = td->td_proc;
 		const Elf_Brandinfo *bi = p->p_elf_brandinfo;
-		if (bi == NULL || ((bi->flags & LINUX_BI_FUTEX_REQUEUE)) == 0)
+		if (bi == NULL || ((bi->flags & LINUX_BI_FUTEX_REQUEUE)) == 0) {
+			pem = pem_find(p);
+			if ((pem->flags & LINUX_XDEPR_REQUEUEOP) == 0) {
+				linux_msg(td, "unsupported FUTEX_REQUEUE");
+				pem->flags |= LINUX_XDEPR_REQUEUEOP;
+			}
 			return (EINVAL);
+		}
 		args->val3_compare = false;
 		/* FALLTHROUGH */
 
