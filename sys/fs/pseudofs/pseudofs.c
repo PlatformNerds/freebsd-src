@@ -332,6 +332,35 @@ pfs_create_link(struct pfs_node *parent, struct pfs_node **opn,
 }
 
 /*
+ * Create a directory of a process's open file descriptors, like Linux's
+ * /proc/<pid>/fd: one entry per descriptor, which readlink(2) resolves to the
+ * file's path and open(2) opens as the process's file.  Access requires that
+ * the caller may debug the process.  It must be created in a process
+ * directory.
+ */
+int
+pfs_create_fddir(struct pfs_node *parent, struct pfs_node **opn,
+		 const char *name, int flags)
+{
+	struct pfs_node *pn;
+	int rc;
+
+	if (opn != NULL)
+		*opn = NULL;
+	pn = pfs_alloc_node_flags(parent->pn_info, name, pfstype_fddir, flags);
+	if (pn == NULL)
+		return (ENOMEM);
+	pn->pn_flags = flags;
+	if ((rc = pfs_add_node(parent, pn)) != 0) {
+		pfs_destroy(pn);
+		pn = NULL;
+	} else if (opn != NULL) {
+		*opn = pn;
+	}
+	return (rc);
+}
+
+/*
  * Locate a node by name
  */
 struct pfs_node *

@@ -62,7 +62,8 @@ typedef enum {
 	pfstype_parent,
 	pfstype_file,
 	pfstype_symlink,
-	pfstype_procdir
+	pfstype_procdir,
+	pfstype_fddir
 } pfs_type_t;
 
 /*
@@ -192,6 +193,13 @@ typedef int (*pfs_destroy_t)(PFS_DESTROY_ARGS);
  * for unrhdr.  The rest of struct pfs_info is only modified during
  * vfs_init() and vfs_uninit() of the consumer filesystem.
  */
+/*
+ * Optional per-filesystem hook for process directories: it may rewrite the
+ * pid named by a lookup, and returns true if the result depends on the
+ * calling thread, in which case the name is not entered in the name cache.
+ */
+typedef bool (*pfs_pidmap_t)(struct thread *td, pid_t *pid);
+
 struct pfs_info {
 	char			 pi_name[PFS_FSNAMELEN];
 	pfs_init_t		 pi_init;
@@ -201,6 +209,7 @@ struct pfs_info {
 	struct pfs_node		*pi_root;
 	struct mtx		 pi_mutex;
 	struct unrhdr		*pi_unrhdr;
+	pfs_pidmap_t		 pi_pidmap;
 };
 
 /*
@@ -267,6 +276,8 @@ int pfs_create_link		(struct pfs_node *parent, struct pfs_node **opn,
 				 const char *name, pfs_fill_t fill,
 				 pfs_attr_t attr, pfs_vis_t vis,
 				 pfs_destroy_t destroy, int flags);
+int pfs_create_fddir		(struct pfs_node *parent, struct pfs_node **opn,
+				 const char *name, int flags);
 struct pfs_node	*pfs_find_node	(struct pfs_node *parent, const char *name);
 void		 pfs_purge	(struct pfs_node *pn);
 int		 pfs_destroy	(struct pfs_node *pn);
