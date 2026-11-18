@@ -755,6 +755,29 @@ linux_set_socket_flags(int lflags, int *flags)
 	return (0);
 }
 
+/*
+ * FreeBSD reports an unnamed AF_UNIX address (an unbound socket, or the
+ * sender or peer of one) as a zeroed struct sockaddr.  Linux reports it with
+ * only the address family from getsockname(2), getpeername(2) and accept(2),
+ * and with no address at all from recvfrom(2) and recvmsg(2).
+ */
+static bool
+linux_unix_unnamed(const struct sockaddr *sa, socklen_t len)
+{
+	const struct sockaddr_un *sun = (const struct sockaddr_un *)sa;
+	size_t i;
+
+	/* len is the number of valid bytes at sa. */
+	if (sa == NULL || len < sizeof(struct sockaddr) ||
+	    sa->sa_family != AF_UNIX || sa->sa_len != sizeof(struct sockaddr))
+		return (false);
+	for (i = 0; i < sizeof(struct sockaddr) -
+	    offsetof(struct sockaddr_un, sun_path); i++)
+		if (sun->sun_path[i] != '\0')
+			return (false);
+	return (true);
+}
+
 static int
 linux_copyout_sockaddr(const struct sockaddr *sa, void *uaddr, size_t len)
 {
@@ -1077,6 +1100,8 @@ linux_accept_common(struct thread *td, int s, l_uintptr_t addr,
 	}
 
 	if (PTRIN(addr) != NULL) {
+		if (linux_unix_unnamed((struct sockaddr *)&ss, ss.ss_len))
+			ss.ss_len = offsetof(struct sockaddr_un, sun_path);
 		len = min(ss.ss_len, len);
 		error = linux_copyout_sockaddr((struct sockaddr *)&ss,
 		    PTRIN(addr), len);
@@ -1125,6 +1150,8 @@ linux_getsockname(struct thread *td, struct linux_getsockname_args *args)
 	if (error != 0)
 		return (error);
 
+	if (linux_unix_unnamed((struct sockaddr *)&ss, ss.ss_len))
+		ss.ss_len = offsetof(struct sockaddr_un, sun_path);
 	len = min(ss.ss_len, len);
 	error = linux_copyout_sockaddr((struct sockaddr *)&ss,
 	    PTRIN(args->addr), len);
@@ -1150,6 +1177,8 @@ linux_getpeername(struct thread *td, struct linux_getpeername_args *args)
 	if (error != 0)
 		return (error);
 
+	if (linux_unix_unnamed((struct sockaddr *)&ss, ss.ss_len))
+		ss.ss_len = offsetof(struct sockaddr_un, sun_path);
 	len = min(ss.ss_len, len);
 	error = linux_copyout_sockaddr((struct sockaddr *)&ss,
 	    PTRIN(args->addr), len);
@@ -1341,6 +1370,8 @@ linux_recvfrom(struct thread *td, struct linux_recvfrom_args *args)
 	 * So, kern_recvit() set msg.msg_namelen to 0 if protocol pr_flags
 	 * does not contains PR_ADDR flag.
 	 */
+	if (linux_unix_unnamed(sa, msg.msg_namelen))
+		msg.msg_namelen = 0;
 	if (PTRIN(args->from) != NULL && msg.msg_namelen != 0)
 		error = linux_copyout_sockaddr(sa, PTRIN(args->from),
 		    msg.msg_namelen);
@@ -1831,6 +1862,8 @@ linux_recvmsg_common(struct thread *td, l_int s, struct l_msghdr *msghdr,
 	/*
 	 * Note that kern_recvit() updates msg->msg_namelen.
 	 */
+	if (linux_unix_unnamed(sa, msg->msg_namelen))
+		msg->msg_namelen = 0;
 	if (msg->msg_name != NULL && msg->msg_namelen > 0) {
 		msg->msg_name = PTRIN(l_msghdr.msg_name);
 		error = linux_copyout_sockaddr(sa, msg->msg_name,
