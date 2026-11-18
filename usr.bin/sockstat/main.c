@@ -915,6 +915,32 @@ formataddr(struct sockaddr_storage *ss, char *buf, size_t bufsize)
 	case AF_UNIX:
 		sun = sstosun(ss);
 		off = (int)((char *)&sun->sun_path - (char *)sun);
+		if (sun->sun_len > off && sun->sun_path[0] == '\0') {
+			/*
+			 * An abstract address: a name in no file system, all of
+			 * whose bytes count.  Show it as Linux ss(8) does, with
+			 * each NUL as '@'.  All-zero is an unnamed address.
+			 */
+			char abs[sizeof(sun->sun_path) + 1];
+			int i, len;
+			bool named = false;
+
+			len = MIN(sun->sun_len - off, (int)sizeof(sun->sun_path));
+			for (i = 0; i < len; i++) {
+				abs[i] = sun->sun_path[i] == '\0' ? '@' :
+				    sun->sun_path[i];
+				if (sun->sun_path[i] != '\0')
+					named = true;
+			}
+			abs[len] = '\0';
+			if (named) {
+				if (is_xo_style_encoding) {
+					xo_emit("{:path/%s}", abs);
+					return (0);
+				}
+				return (snprintf(buf, bufsize, "%s", abs));
+			}
+		}
 		if (is_xo_style_encoding) {
 			xo_emit("{:path/%.*s}", sun->sun_len - off,
 				sun->sun_path);
