@@ -116,6 +116,14 @@ int
 pfs_vncache_alloc(struct mount *mp, struct vnode **vpp,
 		  struct pfs_node *pn, pid_t pid)
 {
+
+	return (pfs_vncache_alloc_fd(mp, vpp, pn, pid, -1));
+}
+
+int
+pfs_vncache_alloc_fd(struct mount *mp, struct vnode **vpp,
+		  struct pfs_node *pn, pid_t pid, int fd)
+{
 	struct pfs_vncache_head *hash;
 	struct pfs_vdata *pvd, *pvd2;
 	struct vnode *vp;
@@ -131,7 +139,7 @@ pfs_vncache_alloc(struct mount *mp, struct vnode **vpp,
 retry:
 	mtx_lock(&pfs_vncache_mutex);
 	SLIST_FOREACH(pvd, hash, pvd_hash) {
-		if (pvd->pvd_pn == pn && pvd->pvd_pid == pid &&
+		if (pvd->pvd_pn == pn && pvd->pvd_pid == pid && pvd->pvd_fd == fd &&
 		    pvd->pvd_vnode->v_mount == mp) {
 			vp = pvd->pvd_vnode;
 			vs = vget_prep(vp);
@@ -165,6 +173,7 @@ alloc:
 	}
 	pvd->pvd_pn = pn;
 	pvd->pvd_pid = pid;
+	pvd->pvd_fd = fd;
 	(*vpp)->v_data = pvd;
 	switch (pn->pn_type) {
 	case pfstype_root:
@@ -184,6 +193,19 @@ alloc:
 		break;
 	case pfstype_symlink:
 		(*vpp)->v_type = VLNK;
+		break;
+	case pfstype_fddir:
+		/*
+		 * The directory, or one of its entries: like fdescfs entries,
+		 * they are VCHR vnodes that support readlink(2), so that
+		 * open(2) reaches VOP_OPEN instead of following a path.
+		 */
+		if (fd < 0)
+			(*vpp)->v_type = VDIR;
+		else {
+			(*vpp)->v_type = VCHR;
+			(*vpp)->v_vflag |= VV_READLINK;
+		}
 		break;
 	case pfstype_none:
 		KASSERT(0, ("pfs_vncache_alloc called for null node\n"));
@@ -215,6 +237,7 @@ retry2:
 	 */
 	SLIST_FOREACH(pvd2, hash, pvd_hash) {
 		if (pvd2->pvd_pn == pn && pvd2->pvd_pid == pid &&
+		    pvd2->pvd_fd == fd &&
 		    pvd2->pvd_vnode->v_mount == mp) {
 			vp = pvd2->pvd_vnode;
 			vs = vget_prep(vp);

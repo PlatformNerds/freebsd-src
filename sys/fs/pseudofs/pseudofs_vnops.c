@@ -32,11 +32,14 @@
 #include "opt_pseudofs.h"
 
 #include <sys/param.h>
+#include <sys/capsicum.h>
 #include <sys/kernel.h>
 #include <sys/systm.h>
 #include <sys/ctype.h>
 #include <sys/dirent.h>
 #include <sys/fcntl.h>
+#include <sys/file.h>
+#include <sys/filedesc.h>
 #include <sys/imgact.h>
 #include <sys/limits.h>
 #include <sys/lock.h>
@@ -46,6 +49,7 @@
 #include <sys/namei.h>
 #include <sys/proc.h>
 #include <sys/sbuf.h>
+#include <sys/stat.h>
 #include <sys/sx.h>
 #include <sys/sysctl.h>
 #include <sys/vnode.h>
@@ -56,7 +60,8 @@
 #define KASSERT_PN_IS_DIR(pn)						\
 	KASSERT((pn)->pn_type == pfstype_root ||			\
 	    (pn)->pn_type == pfstype_dir ||				\
-	    (pn)->pn_type == pfstype_procdir,				\
+	    (pn)->pn_type == pfstype_procdir ||				\
+	    (pn)->pn_type == pfstype_fddir,				\
 	    ("%s(): VDIR vnode refers to non-directory pfs_node", __func__))
 
 #define KASSERT_PN_IS_FILE(pn)						\
@@ -151,6 +156,276 @@ pfs_lookup_proc(pid_t pid, struct proc **p)
 }
 
 /*
+ * Descriptor directories (pfstype_fddir).  As on Linux, the caller must be
+ * allowed to debug the process.  Returns a reference to the file behind
+ * descriptor fd, or with fd < 0 only checks access.  If credp is not NULL,
+ * it returns a reference to the process's credentials too.  If fcaps is not
+ * NULL, it returns the descriptor's capability rights.
+ */
+static int
+pfs_fd_file(struct thread *td, struct pfs_node *pn, pid_t pid, int fd,
+    struct file **fpp, struct ucred **credp, struct filecaps *fcaps)
+{
+	uint8_t fd_flags;
+
+	struct proc *proc;
+	int error;
+
+	if (!pfs_visible(td, pn, pid, &proc))
+		return (ENOENT);
+	if (p_candebug(td, proc) != 0) {
+		PROC_UNLOCK(proc);
+		return (EACCES);
+	}
+	if (credp != NULL)
+		*credp = crhold(proc->p_ucred);
+	_PHOLD(proc);
+	PROC_UNLOCK(proc);
+	error = 0;
+	if (fd >= 0) {
+		error = fget_remote(td, proc, fd, fcaps,
+		    fcaps != NULL ? &fd_flags : NULL, fpp);
+		if (error == EBADF)
+			error = ENOENT;
+	}
+	PRELE(proc);
+	if (error != 0 && credp != NULL)
+		crfree(*credp);
+	return (error);
+}
+
+static int
+pfs_lookup_fd(struct vnode *dvp, struct pfs_vdata *pvd,
+    struct componentname *cnp, struct vnode **vpp)
+{
+	struct file *fp;
+	int error, fd, i;
+
+	/* Canonical decimal numbers only, as Linux. */
+	if (cnp->cn_namelen > 1 && cnp->cn_nameptr[0] == '0')
+		return (ENOENT);
+	for (fd = 0, i = 0; i < cnp->cn_namelen; i++) {
+		if (!isdigit(cnp->cn_nameptr[i]) || fd > (INT_MAX - 9) / 10)
+			return (ENOENT);
+		fd = fd * 10 + cnp->cn_nameptr[i] - '0';
+	}
+	error = pfs_fd_file(curthread, pvd->pvd_pn, pvd->pvd_pid, fd, &fp,
+	    NULL, NULL);
+	if (error != 0)
+		return (error);
+	fdrop(fp, curthread);
+	/* Not entered in the name cache: descriptors come and go. */
+	return (pfs_vncache_alloc_fd(dvp->v_mount, vpp, pvd->pvd_pn,
+	    pvd->pvd_pid, fd));
+}
+
+static int
+pfs_getattr_fd(struct vnode *vn, struct pfs_vdata *pvd, struct vattr *vap)
+{
+	struct ucred *cred;
+	struct file *fp;
+	int error;
+
+	error = pfs_fd_file(curthread, pvd->pvd_pn, pvd->pvd_pid, pvd->pvd_fd,
+	    &fp, &cred, NULL);
+	if (error != 0)
+		return (error);
+	/* A link, as on Linux, with the access mode of the descriptor. */
+	vap->va_type = VLNK;
+	vap->va_mode = ((fp->f_flag & FREAD) != 0 ? 0500 : 0) |
+	    ((fp->f_flag & FWRITE) != 0 ? 0300 : 0);
+	vap->va_uid = cred->cr_ruid;
+	vap->va_gid = cred->cr_rgid;
+	vap->va_fileid = pn_fileno(pvd->pvd_pn, pvd->pvd_pid);
+	vap->va_flags = 0;
+	vap->va_blocksize = PAGE_SIZE;
+	vap->va_bytes = vap->va_size = 64;
+	vap->va_filerev = 0;
+	vap->va_fsid = vn->v_mount->mnt_stat.f_fsid.val[0];
+	vap->va_nlink = 1;
+	vap->va_rdev = NODEV;
+	nanotime(&vap->va_ctime);
+	vap->va_atime = vap->va_mtime = vap->va_ctime;
+	crfree(cred);
+	fdrop(fp, curthread);
+	return (0);
+}
+
+/*
+ * Opening a descriptor entry gives the caller the process's open file, as
+ * Linux does for pipes and sockets.  The file is installed in a spare
+ * descriptor that is handed to openatfp() through td_dupfd and ENXIO, which
+ * makes dupfdopen() move it to the descriptor that open(2) returns.  This
+ * only happens for open(2) itself (td_dupfd is -1 there), and not for
+ * strictly relative lookups, where openatfp() would not take the descriptor.
+ */
+static int
+pfs_open_fd(struct vop_open_args *va)
+{
+	struct pfs_vdata *pvd = va->a_vp->v_data;
+	struct thread *td = va->a_td;
+	struct filecaps fcaps;
+	struct file *fp;
+	int error, fd;
+
+	if (td == NULL || td != curthread || td->td_dupfd != -1 ||
+	    IN_CAPABILITY_MODE(td) || (va->a_mode & O_RESOLVE_BENEATH) != 0)
+		return (EOPNOTSUPP);
+	error = pfs_fd_file(td, pvd->pvd_pn, pvd->pvd_pid, pvd->pvd_fd, &fp,
+	    NULL, &fcaps);
+	if (error != 0)
+		return (error);
+	if (((va->a_mode & (FREAD | FWRITE)) | fp->f_flag) != fp->f_flag) {
+		filecaps_free(&fcaps);
+		fdrop(fp, td);
+		return (EACCES);
+	}
+	/* The new descriptor keeps the capability rights of the original. */
+	error = finstall(td, fp, &fd, va->a_mode & O_CLOEXEC, &fcaps);
+	if (error != 0)
+		filecaps_free(&fcaps);
+	fdrop(fp, td);
+	if (error != 0)
+		return (error);
+	td->td_dupfd = fd;
+	return (ENXIO);
+}
+
+static int
+pfs_readlink_fd(struct vnode *vn, struct pfs_vdata *pvd, struct uio *uio)
+{
+	struct thread *td;
+	struct file *fp;
+	struct stat sb;
+	char buf[64], *freepath, *path;
+	const char *fullpath;
+	int error, locked;
+
+	td = curthread;
+	freepath = NULL;
+	fullpath = NULL;
+	vhold(vn);
+	locked = VOP_ISLOCKED(vn);
+	VOP_UNLOCK(vn);
+	error = pfs_fd_file(td, pvd->pvd_pn, pvd->pvd_pid, pvd->pvd_fd, &fp,
+	    NULL, NULL);
+	if (error != 0)
+		goto out;
+	switch (fp->f_type) {
+	case DTYPE_VNODE:
+		error = vn_fullpath(fp->f_vnode, &path, &freepath);
+		if (error == 0)
+			fullpath = path;
+		break;
+	case DTYPE_PIPE:
+	case DTYPE_SOCKET:
+		error = fo_stat(fp, &sb, td->td_ucred);
+		if (error == 0) {
+			snprintf(buf, sizeof(buf), "%s:[%ju]",
+			    fp->f_type == DTYPE_PIPE ? "pipe" : "socket",
+			    (uintmax_t)sb.st_ino);
+			fullpath = buf;
+		}
+		break;
+	case DTYPE_KQUEUE:
+		/* The Linuxulator's epoll is a kqueue. */
+		fullpath = "anon_inode:[eventpoll]";
+		break;
+	default:
+		fullpath = "anon_inode:[unknown]";
+		break;
+	}
+	if (error == 0)
+		error = uiomove(__DECONST(char *, fullpath), strlen(fullpath),
+		    uio);
+	free(freepath, M_TEMP);
+	fdrop(fp, td);
+out:
+	vn_lock(vn, locked | LK_RETRY);
+	vdrop(vn);
+	return (error);
+}
+
+struct pfs_fdlist {
+	int	*fds;
+	int	 n;
+	int	 cap;
+};
+
+static int
+pfs_fdlist_add(struct proc *p __unused, int fd, struct file *fp __unused,
+    void *arg)
+{
+	struct pfs_fdlist *l = arg;
+	int *fds;
+
+	if (l->n == l->cap) {
+		l->cap = l->cap == 0 ? 32 : l->cap * 2;
+		fds = malloc(l->cap * sizeof(*fds), M_TEMP, M_WAITOK);
+		if (l->n > 0)
+			memcpy(fds, l->fds, l->n * sizeof(*fds));
+		free(l->fds, M_TEMP);
+		l->fds = fds;
+	}
+	l->fds[l->n++] = fd;
+	return (0);
+}
+
+static int
+pfs_readdir_fd(struct pfs_vdata *pvd, struct uio *uio, int *eofflag)
+{
+	struct pfs_fdlist l = { NULL, 0, 0 };
+	struct pfs_node *pd = pvd->pvd_pn;
+	struct dirent d;
+	struct proc *proc;
+	struct thread *td;
+	int error, k, n;
+
+	td = curthread;
+	if (!pfs_visible(td, pd, pvd->pvd_pid, &proc))
+		return (ENOENT);
+	if (p_candebug(td, proc) != 0) {
+		PROC_UNLOCK(proc);
+		return (EACCES);
+	}
+	_PHOLD(proc);
+	PROC_UNLOCK(proc);
+	error = fget_remote_foreach(td, proc, pfs_fdlist_add, &l);
+	PRELE(proc);
+	if (error != 0)
+		goto out;
+
+	n = l.n + 2;
+	for (k = uio->uio_offset / PFS_DELEN;
+	    k < n && uio->uio_resid >= PFS_DELEN; k++) {
+		memset(&d, 0, sizeof(d));
+		d.d_reclen = PFS_DELEN;
+		d.d_off = (k + 1) * PFS_DELEN;
+		if (k < 2) {
+			d.d_namlen = k + 1;
+			d.d_name[0] = d.d_name[k] = '.';
+			d.d_type = DT_DIR;
+			d.d_fileno = k == 0 ? pn_fileno(pd, pvd->pvd_pid) :
+			    pn_fileno(pd->pn_parent, pvd->pvd_pid);
+		} else {
+			d.d_namlen = snprintf(d.d_name, PFS_NAMELEN, "%d",
+			    l.fds[k - 2]);
+			d.d_type = DT_LNK;
+			d.d_fileno = pn_fileno(pd, pvd->pvd_pid);
+		}
+		dirent_terminate(&d);
+		error = uiomove(&d, PFS_DELEN, uio);
+		if (error != 0)
+			break;
+	}
+	if (eofflag != NULL && k >= n)
+		*eofflag = 1;
+out:
+	free(l.fds, M_TEMP);
+	return (error);
+}
+
+/*
  * Verify permissions
  */
 static int
@@ -224,6 +499,9 @@ pfs_getattr(struct vop_getattr_args *va)
 	PFS_TRACE(("%s", pn->pn_name));
 	pfs_assert_not_owned(pn);
 
+	if (pn->pn_type == pfstype_fddir && pvd->pvd_fd >= 0)
+		PFS_RETURN (pfs_getattr_fd(vn, pvd, vap));
+
 	if (!pfs_visible(curthread, pn, pvd->pvd_pid, &proc))
 		PFS_RETURN (ENOENT);
 
@@ -248,6 +526,9 @@ pfs_getattr(struct vop_getattr_args *va)
 		pfs_unlock(pn);
 #endif
 		vap->va_mode = 0555;
+		break;
+	case pfstype_fddir:
+		vap->va_mode = 0500;
 		break;
 	case pfstype_file:
 	case pfstype_symlink:
@@ -392,6 +673,14 @@ pfs_vptocnp(struct vop_vptocnp_args *ap)
 		vhold(*dvp);
 		pfs_unlock(pd);
 		PFS_RETURN (0);
+	} else if (pd->pn_type == pfstype_fddir && pvd->pvd_fd >= 0) {
+		len = snprintf(pidbuf, sizeof(pidbuf), "%d", pvd->pvd_fd);
+		i -= len;
+		if (i < 0) {
+			error = ENOMEM;
+			goto failed;
+		}
+		bcopy(pidbuf, buf + i, len);
 	} else if (vp->v_type == VDIR && pd->pn_type == pfstype_procdir) {
 		len = snprintf(pidbuf, sizeof(pidbuf), "%d", pid);
 		i -= len;
@@ -411,6 +700,8 @@ pfs_vptocnp(struct vop_vptocnp_args *ap)
 	}
 
 	pn = pd->pn_parent;
+	if (pd->pn_type == pfstype_fddir && pvd->pvd_fd >= 0)
+		pn = pd;
 	pfs_unlock(pd);
 
 	mp = vp->v_mount;
@@ -458,6 +749,7 @@ pfs_lookup(struct vop_cachedlookup_args *va)
 	pid_t pid = pvd->pvd_pid;
 	char *pname;
 	int error, i, namelen, visible;
+	bool nocache = false;
 
 	PFS_TRACE(("%.*s", (int)cnp->cn_namelen, cnp->cn_nameptr));
 	pfs_assert_not_owned(pd);
@@ -533,6 +825,9 @@ pfs_lookup(struct vop_cachedlookup_args *va)
 		goto got_pnode;
 	}
 
+	if (pd->pn_type == pfstype_fddir)
+		PFS_RETURN (pfs_lookup_fd(vn, pvd, cnp, vpp));
+
 	pfs_lock(pd);
 
 	/* named node */
@@ -553,6 +848,9 @@ pfs_lookup(struct vop_cachedlookup_args *va)
 				break;
 		if (i == cnp->cn_namelen) {
 			pfs_unlock(pd);
+			if (pd->pn_info->pi_pidmap != NULL &&
+			    pd->pn_info->pi_pidmap(curthread, &pid))
+				nocache = true;
 			goto got_pnode;
 		}
 	}
@@ -583,7 +881,7 @@ pfs_lookup(struct vop_cachedlookup_args *va)
 			PFS_RETURN(ENOENT);
 		}
 	}
-	if (cnp->cn_flags & MAKEENTRY && !VN_IS_DOOMED(vn))
+	if (cnp->cn_flags & MAKEENTRY && !VN_IS_DOOMED(vn) && !nocache)
 		cache_enter(vn, *vpp, cnp);
 	PFS_RETURN (0);
  failed:
@@ -608,6 +906,9 @@ pfs_open(struct vop_open_args *va)
 
 	PFS_TRACE(("%s (mode 0x%x)", pn->pn_name, mode));
 	pfs_assert_not_owned(pn);
+
+	if (pn->pn_type == pfstype_fddir && pvd->pvd_fd >= 0)
+		PFS_RETURN (pfs_open_fd(va));
 
 	/* check if the requested mode is permitted */
 	if (((mode & FREAD) && !(mode & PFS_RD)) ||
@@ -896,6 +1197,9 @@ pfs_readdir(struct vop_readdir_args *va)
 	if (resid == 0)
 		PFS_RETURN (0);
 
+	if (pd->pn_type == pfstype_fddir)
+		PFS_RETURN (pfs_readdir_fd(pvd, uio, va->a_eofflag));
+
 	proc = NULL;
 	if (pid != NO_PID && !pfs_lookup_proc(pid, &proc))
 		PFS_RETURN (ENOENT);
@@ -958,6 +1262,7 @@ pfs_readdir(struct vop_readdir_args *va)
 		case pfstype_dir:
 		case pfstype_this:
 		case pfstype_parent:
+		case pfstype_fddir:
 			pfsent->entry.d_type = DT_DIR;
 			break;
 		case pfstype_file:
@@ -1010,6 +1315,9 @@ pfs_readlink(struct vop_readlink_args *va)
 
 	PFS_TRACE(("%s", pn->pn_name));
 	pfs_assert_not_owned(pn);
+
+	if (pn->pn_type == pfstype_fddir && pvd->pvd_fd >= 0)
+		PFS_RETURN (pfs_readlink_fd(vn, pvd, uio));
 
 	if (vn->v_type != VLNK)
 		PFS_RETURN (EINVAL);

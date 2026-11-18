@@ -69,6 +69,7 @@
 #include <sys/socket.h>
 #include <sys/syscallsubr.h>
 #include <sys/sysctl.h>
+#include <sys/sx.h>
 #include <sys/sysent.h>
 #include <sys/time.h>
 #include <sys/tty.h>
@@ -1849,17 +1850,40 @@ linprocfs_domodules(PFS_FILL_ARGS)
 }
 
 /*
- * Filler function for proc/pid/fd
+ * In a jail, /proc/1 is the jail's oldest process.  For a container that is
+ * its first process, which is PID 1 in the container's PID namespace on
+ * Linux; programs use /proc/1, e.g. /proc/1/fd/1 to write to the container's
+ * log.  Outside jails /proc/1 is init, as before.
  */
-static int
-linprocfs_dofdescfs(PFS_FILL_ARGS)
+static bool
+linprocfs_pidmap(struct thread *td, pid_t *pidp)
 {
+	struct prison *pr;
+	struct proc *p;
+	struct timeval start;
+	pid_t init;
 
-	if (p == curproc)
-		sbuf_printf(sb, "/dev/fd");
-	else
-		sbuf_printf(sb, "unknown");
-	return (0);
+	if (*pidp != 1)
+		return (false);
+	pr = td->td_ucred->cr_prison;
+	if (pr == &prison0)
+		return (true);
+	init = 0;
+	sx_slock(&allproc_lock);
+	FOREACH_PROC_IN_SYSTEM(p) {
+		PROC_LOCK(p);
+		if (p->p_state == PRS_NORMAL && (p->p_flag & P_WEXIT) == 0 &&
+		    p->p_ucred->cr_prison == pr && (init == 0 ||
+		    timevalcmp(&p->p_stats->p_start, &start, <))) {
+			init = p->p_pid;
+			start = p->p_stats->p_start;
+		}
+		PROC_UNLOCK(p);
+	}
+	sx_sunlock(&allproc_lock);
+	if (init != 0)
+		*pidp = init;
+	return (true);
 }
 
 /*
@@ -2504,6 +2528,7 @@ linprocfs_init(PFS_INIT_ARGS)
 	struct pfs_node *dir, *fs, *root, *sys;
 
 	root = pi->pi_root;
+	pi->pi_pidmap = linprocfs_pidmap;
 
 	/* /proc/... */
 	pfs_create_file(root, NULL, "cmdline", &linprocfs_docmdline, NULL, NULL,
@@ -2575,8 +2600,7 @@ linprocfs_init(PFS_INIT_ARGS)
 	    NULL, PFS_RD);
 	pfs_create_file(dir, NULL, "status", &linprocfs_doprocstatus, NULL,
 	    NULL, NULL, PFS_RD);
-	pfs_create_link(dir, NULL, "fd", &linprocfs_dofdescfs, NULL, NULL, NULL,
-	    0);
+	pfs_create_fddir(dir, NULL, "fd", 0);
 	pfs_create_file(dir, NULL, "auxv", &linprocfs_doauxv, NULL,
 	    &procfs_candebug, NULL, PFS_RD | PFS_RAWRD);
 	pfs_create_file(dir, NULL, "limits", &linprocfs_doproclimits, NULL,
