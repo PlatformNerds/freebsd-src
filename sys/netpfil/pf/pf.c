@@ -10445,6 +10445,14 @@ pf_check_proto_cksum(struct mbuf *m, int off, int len, u_int8_t p, sa_family_t a
 			}
 			sum ^= 0xffff;
 			++hw_assist;
+		} else if (m->m_pkthdr.csum_flags & (CSUM_IP_TCP | CSUM_IP6_TCP)) {
+			/*
+			 * Sent by this host or a VNET jail on it with the
+			 * checksum left to offload, as tcp_input() and
+			 * udp_input() accept: the checksum field isn't
+			 * filled in yet.
+			 */
+			++hw_assist;
 		}
 		break;
 	case IPPROTO_UDP:
@@ -10458,6 +10466,14 @@ pf_check_proto_cksum(struct mbuf *m, int off, int len, u_int8_t p, sa_family_t a
 				m->m_pkthdr.csum_data + IPPROTO_UDP));
 			}
 			sum ^= 0xffff;
+			++hw_assist;
+		} else if (m->m_pkthdr.csum_flags & (CSUM_IP_UDP | CSUM_IP6_UDP)) {
+			/*
+			 * Sent by this host or a VNET jail on it with the
+			 * checksum left to offload, as tcp_input() and
+			 * udp_input() accept: the checksum field isn't
+			 * filled in yet.
+			 */
 			++hw_assist;
 		}
 		break;
