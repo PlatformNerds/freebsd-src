@@ -65,6 +65,7 @@
 #include <sys/fcntl.h>
 #include <sys/file.h>
 #include <sys/filedesc.h>
+#include <sys/hash.h>
 #include <sys/jail.h>
 #include <sys/kernel.h>
 #include <sys/lock.h>
@@ -590,6 +591,156 @@ unp_sun_path(const struct sockaddr *nam, const char **pathp, int *lenp)
 	return (0);
 }
 
+/*
+ * Abstract socket addresses, as on Linux: a sun_path that starts with a NUL
+ * byte names a socket in a namespace that is not the file system.  The name
+ * is all sun_len - offsetof(sun_path) bytes, NULs included.  Linux scopes the
+ * namespace to the network namespace; here it is scoped to the VNET, so jails
+ * sharing a VNET share names.  A name is released when its socket is closed.
+ * There are no permission checks, as on Linux.
+ *
+ * unp_abs_mtx protects the table.  A connecting socket takes a reference on
+ * the peer socket under it, which keeps the peer stable afterwards.
+ */
+struct unp_absent {
+	LIST_ENTRY(unp_absent)	ua_link;
+	struct vnet		*ua_vnet;
+	struct unpcb		*ua_unp;
+};
+#define	UNP_ABS_HASHSIZE	64
+static LIST_HEAD(, unp_absent) unp_abs_hash[UNP_ABS_HASHSIZE];
+static struct mtx unp_abs_mtx;
+MTX_SYSINIT(unp_abs, &unp_abs_mtx, "unp_abstract", MTX_DEF);
+
+static struct vnet *
+unp_abs_vnet(struct socket *so)
+{
+
+#ifdef VIMAGE
+	return (so->so_vnet);
+#else
+	return (NULL);
+#endif
+}
+
+static u_int
+unp_abs_bucket(struct vnet *vnet, const char *name, int len)
+{
+
+	return (hash32_buf(name, len, (uint32_t)(uintptr_t)vnet) &
+	    (UNP_ABS_HASHSIZE - 1));
+}
+
+static struct unpcb *
+unp_abs_lookup(struct vnet *vnet, const char *name, int len)
+{
+	struct unp_absent *ua;
+	const struct sockaddr_un *addr;
+
+	mtx_assert(&unp_abs_mtx, MA_OWNED);
+	LIST_FOREACH(ua, &unp_abs_hash[unp_abs_bucket(vnet, name, len)],
+	    ua_link) {
+		addr = ua->ua_unp->unp_addr;
+		if (ua->ua_vnet == vnet && addr->sun_len ==
+		    offsetof(struct sockaddr_un, sun_path) + len &&
+		    memcmp(addr->sun_path, name, len) == 0)
+			return (ua->ua_unp);
+	}
+	return (NULL);
+}
+
+/*
+ * Called by uipc_bindat() with UNP_BINDING set.
+ */
+static int
+unp_abs_bind(struct socket *so, struct unpcb *unp, struct sockaddr *nam,
+    const char *name, int len)
+{
+	struct sockaddr_un *soun;
+	struct unp_absent *ua;
+	struct vnet *vnet;
+	int error;
+
+	vnet = unp_abs_vnet(so);
+	soun = (struct sockaddr_un *)sodupsockaddr(nam, M_WAITOK);
+	ua = malloc(sizeof(*ua), M_PCB, M_WAITOK);
+	ua->ua_vnet = vnet;
+	ua->ua_unp = unp;
+	error = 0;
+	mtx_lock(&unp_abs_mtx);
+	if (unp_abs_lookup(vnet, name, len) != NULL)
+		error = EADDRINUSE;
+	else {
+		UNP_PCB_LOCK(unp);
+		unp->unp_addr = soun;
+		unp->unp_flags |= UNP_ABSTRACT;
+		unp->unp_flags &= ~UNP_BINDING;
+		UNP_PCB_UNLOCK(unp);
+		LIST_INSERT_HEAD(&unp_abs_hash[unp_abs_bucket(vnet, name, len)],
+		    ua, ua_link);
+	}
+	mtx_unlock(&unp_abs_mtx);
+	if (error != 0) {
+		free(soun, M_SONAME);
+		free(ua, M_PCB);
+		UNP_PCB_LOCK(unp);
+		unp->unp_flags &= ~UNP_BINDING;
+		UNP_PCB_UNLOCK(unp);
+	}
+	return (error);
+}
+
+/*
+ * Release the socket's abstract name, if it has one.  The address itself
+ * stays in unp_addr for getsockname() until the socket is freed.
+ */
+static void
+unp_abs_release(struct socket *so, struct unpcb *unp)
+{
+	struct unp_absent *ua;
+
+	UNP_PCB_UNLOCK_ASSERT(unp);
+	ua = NULL;
+	mtx_lock(&unp_abs_mtx);
+	if ((unp->unp_flags & UNP_ABSTRACT) != 0) {
+		LIST_FOREACH(ua, &unp_abs_hash[unp_abs_bucket(unp_abs_vnet(so),
+		    unp->unp_addr->sun_path, unp->unp_addr->sun_len -
+		    offsetof(struct sockaddr_un, sun_path))], ua_link) {
+			if (ua->ua_unp == unp)
+				break;
+		}
+		KASSERT(ua != NULL, ("%s: unp %p not in table", __func__, unp));
+		LIST_REMOVE(ua, ua_link);
+		UNP_PCB_LOCK(unp);
+		unp->unp_flags &= ~UNP_ABSTRACT;
+		UNP_PCB_UNLOCK(unp);
+	}
+	mtx_unlock(&unp_abs_mtx);
+	free(ua, M_PCB);
+}
+
+/*
+ * Find the socket bound to an abstract name and return it referenced.
+ */
+static int
+unp_abs_peer(struct socket *so, const char *name, int len,
+    struct socket **so2p)
+{
+	struct unpcb *unp2;
+	int error;
+
+	mtx_lock(&unp_abs_mtx);
+	unp2 = unp_abs_lookup(unp_abs_vnet(so), name, len);
+	if (unp2 == NULL)
+		error = ECONNREFUSED;
+	else {
+		soref(*so2p = unp2->unp_socket);
+		error = 0;
+	}
+	mtx_unlock(&unp_abs_mtx);
+	return (error);
+}
+
 static int
 uipc_bindat(int fd, struct socket *so, struct sockaddr *nam, struct thread *td)
 {
@@ -624,7 +775,7 @@ uipc_bindat(int fd, struct socket *so, struct sockaddr *nam, struct thread *td)
 	 * implementation and avoids a great many possible failure modes.
 	 */
 	UNP_PCB_LOCK(unp);
-	if (unp->unp_vnode != NULL) {
+	if (unp->unp_vnode != NULL || (unp->unp_flags & UNP_ABSTRACT) != 0) {
 		UNP_PCB_UNLOCK(unp);
 		return (EINVAL);
 	}
@@ -635,6 +786,9 @@ uipc_bindat(int fd, struct socket *so, struct sockaddr *nam, struct thread *td)
 	unp->unp_flags |= UNP_BINDING;
 	mode = unp->unp_mode & ~td->td_proc->p_pd->pd_cmask;
 	UNP_PCB_UNLOCK(unp);
+
+	if (path[0] == '\0')
+		return (unp_abs_bind(so, unp, nam, path, namelen));
 
 	buf = malloc(namelen + 1, M_TEMP, M_WAITOK);
 	bcopy(path, buf, namelen);
@@ -770,6 +924,7 @@ uipc_close(struct socket *so)
 	unp = sotounpcb(so);
 	KASSERT(unp != NULL, ("uipc_close: unp == NULL"));
 
+	unp_abs_release(so, unp);
 	vplock = NULL;
 	if ((vp = unp->unp_vnode) != NULL) {
 		vplock = mtx_pool_find(unp_vp_mtxpool, vp);
@@ -807,7 +962,8 @@ uipc_chmod(struct socket *so, mode_t mode, struct ucred *cred __unused,
 	error = 0;
 	unp = sotounpcb(so);
 	UNP_PCB_LOCK(unp);
-	if (unp->unp_vnode != NULL || (unp->unp_flags & UNP_BINDING) != 0)
+	if (unp->unp_vnode != NULL ||
+	    (unp->unp_flags & (UNP_BINDING | UNP_ABSTRACT)) != 0)
 		error = EINVAL;
 	else
 		unp->unp_mode = mode;
@@ -860,6 +1016,7 @@ uipc_detach(struct socket *so)
 	--unp_count;
 	UNP_LINK_WUNLOCK();
 
+	unp_abs_release(so, unp);
 	UNP_PCB_LOCK(unp);
 	KASSERT(unp->unp_vnode == NULL,
 	    ("%s: unp %p has vnode", __func__, unp));
@@ -3017,7 +3174,13 @@ unp_connectat(int fd, struct socket *so, const char *path, int len,
 	 * is referenced by a file descriptor, then that reference prevents the
 	 * race, so no extra synchronization is needed.
 	 */
-	error = unp_connectat_peer(td, fd, buf, &so2, &mtxp, &vp);
+	if (len > 0 && path[0] == '\0') {
+		/* An abstract name: the peer reference keeps it stable. */
+		mtxp = NULL;
+		vp = NULL;
+		error = unp_abs_peer(so, path, len, &so2);
+	} else
+		error = unp_connectat_peer(td, fd, buf, &so2, &mtxp, &vp);
 	if (error == 0) {
 		error = unp_connect_peer(so, sotounpcb(so2), &sa, td,
 		    referenced_peerp != NULL);
