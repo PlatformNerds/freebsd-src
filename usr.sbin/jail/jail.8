@@ -662,6 +662,11 @@ jail's file system need to be exported by
 .Xr mount 8 .
 For exporting only the jail's file system, a setting of 2
 is sufficient.
+A jail that inherits its network stack from a vnet jail
+.Pq Va vnet Ns = Ns Dq inherit
+may run these daemons too when the
+.Va security.jail.nfsd_inherited_vnet
+sysctl is set to 1; a jail sharing the host's network stack never may.
 If the kernel configuration does not include the
 .Sy NFSD
 option,
