@@ -535,6 +535,14 @@ See the
 and
 .Cm nfsv4
 options for details.
+For compatibility with Linux,
+.Ar vers_number
+may also name a minor version of NFS Version 4, as in
+.Cm vers Ns = Ns Li 4.1 ,
+which is the same as
+.Cm vers Ns = Ns Li 4 Ns , Ns Cm minorversion Ns = Ns Li 1 ,
+and the option may be given as
+.Cm nfsvers .
 .It Cm wcommitsize Ns = Ns Aq Ar value
 Set the maximum pending write commit size to the specified value.
 This determines the maximum amount of pending write data that the NFS
