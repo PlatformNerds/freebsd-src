@@ -922,6 +922,22 @@ pf_sctp_checksum(struct mbuf *m, int off)
 	    sizeof(sum), (caddr_t)&sum);
 }
 
+/*
+ * After pf rewrote an SCTP port and copied the header back, recompute the
+ * checksum, unless the stack has yet to compute it (CSUM_SCTP: a locally
+ * generated packet, checksummed on output).
+ */
+static void
+pf_sctp_cksum_fixup(struct pf_pdesc *pd)
+{
+	if ((pd->sctp_flags & PFDESC_SCTP_CKSUM) == 0)
+		return;
+	pd->sctp_flags &= ~PFDESC_SCTP_CKSUM;
+	if (pd->m->m_pkthdr.csum_flags & (CSUM_SCTP | CSUM_SCTP_IPV6))
+		return;
+	pf_sctp_checksum(pd->m, pd->off);
+}
+
 int
 pf_addr_cmp(const struct pf_addr *a, const struct pf_addr *b, sa_family_t af)
 {
@@ -1016,7 +1032,8 @@ pf_packet_rework_nat(struct pf_pdesc *pd, int off, struct pf_state_key *nk)
 			pf_change_ap(pd, pd->dst, &sh->dest_port,
 			    &nk->addr[pd->didx], nk->port[pd->didx]);
 		}
-
+		m_copyback(pd->m, off, sizeof(*sh), (caddr_t)sh);
+		pf_sctp_cksum_fixup(pd);
 		break;
 	}
 	case IPPROTO_ICMP: {
@@ -3694,6 +3711,12 @@ pf_change_ap(struct pf_pdesc *pd, struct pf_addr *a, u_int16_t *p,
 		return;
 	po = *p;
 	*p = pn;
+	/*
+	 * SCTP's CRC32c covers the ports (but not the addresses) and cannot be
+	 * fixed up incrementally: have pf_sctp_cksum_fixup() recompute it.
+	 */
+	if (pd->proto == IPPROTO_SCTP && po != pn)
+		pd->sctp_flags |= PFDESC_SCTP_CKSUM;
 
 	switch (pd->af) {
 #ifdef INET
@@ -6598,8 +6621,10 @@ pf_test_rule(struct pf_krule **rm, struct pf_kstate **sm,
 	}
 
 	/* copy back packet headers if we performed NAT operations */
-	if (ctx.rewrite)
+	if (ctx.rewrite) {
 		m_copyback(pd->m, pd->off, pd->hdrlen, pd->hdr.any);
+		pf_sctp_cksum_fixup(pd);
+	}
 
 	if (*sm != NULL && !((*sm)->state_flags & PFSTATE_NOSYNC) &&
 	    pd->dir == PF_OUT &&
@@ -7184,6 +7209,8 @@ pf_translate_compat(struct pf_test_ctx *ctx)
 			pd->ndport = pd->hdr.sctp.dest_port;
 			pf_addrcpy(&pd->ndaddr, pd->dst, pd->af);
 		}
+		if (pd->sctp_flags & PFDESC_SCTP_CKSUM)
+			rewrite++;
 		break;
 	}
 #ifdef INET
@@ -8033,8 +8060,10 @@ pf_test_state(struct pf_kstate **state, struct pf_pdesc *pd, u_short *reason)
 		copyback = 1;
 	}
 
-	if (copyback && pd->hdrlen > 0)
+	if (copyback && pd->hdrlen > 0) {
 		m_copyback(pd->m, pd->off, pd->hdrlen, pd->hdr.any);
+		pf_sctp_cksum_fixup(pd);
+	}
 
 	return (action);
 }

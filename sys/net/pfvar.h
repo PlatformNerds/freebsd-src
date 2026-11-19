@@ -1763,6 +1763,7 @@ struct pf_pdesc {
 #define PFDESC_SCTP_HEARTBEAT_ACK	0x0400
 #define PFDESC_SCTP_OTHER	0x0800
 #define PFDESC_SCTP_ADD_IP	0x1000
+#define PFDESC_SCTP_CKSUM	0x2000	/* pf changed a port: redo CRC32c */
 	u_int16_t	 sctp_flags;
 	u_int32_t	 sctp_initiate_tag;
 	u_int16_t	 sctp_dummy_sum;

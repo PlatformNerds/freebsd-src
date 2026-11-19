@@ -71,6 +71,17 @@
 #define	V_pf_rdr_srcport_rewrite_tries	VNET(pf_rdr_srcport_rewrite_tries)
 VNET_DEFINE_STATIC(int, pf_rdr_srcport_rewrite_tries) = 16;
 
+/*
+ * rdr leaves SCTP ports alone by default: the peer of a multihomed association
+ * would reach its other addresses on the untranslated port. Services that
+ * redirect to a different port (Kubernetes' port -> targetPort) need it.
+ */
+VNET_DEFINE_STATIC(int, pf_sctp_rdr_ports) = 0;
+#define	V_pf_sctp_rdr_ports	VNET(pf_sctp_rdr_ports)
+SYSCTL_INT(_net_pf, OID_AUTO, sctp_rdr_ports, CTLFLAG_VNET | CTLFLAG_RW,
+    &VNET_NAME(pf_sctp_rdr_ports), 0,
+    "Let rdr rules change SCTP destination ports");
+
 static uint64_t		 pf_hash(struct pf_addr *, struct pf_addr *,
 			    struct pf_poolhashkey *, sa_family_t);
 static struct pf_krule	*pf_match_translation(int, struct pf_test_ctx *);
@@ -1251,8 +1262,8 @@ pf_get_transaddr(struct pf_test_ctx *ctx, struct pf_krule *r,
 			pf_poolmask(naddr, naddr, &rpool->cur->addr.v.a.mask,
 			    &pd->ndaddr, pd->af);
 
-		/* Do not change SCTP ports. */
-		if (pd->proto == IPPROTO_SCTP)
+		/* Do not change SCTP ports, unless asked to. */
+		if (pd->proto == IPPROTO_SCTP && !V_pf_sctp_rdr_ports)
 			break;
 
 		if (rpool->proxy_port[1]) {
@@ -1278,6 +1289,13 @@ pf_get_transaddr(struct pf_test_ctx *ctx, struct pf_krule *r,
 		 * Update the destination port.
 		 */
 		*nportp = nport;
+
+		/*
+		 * SCTP keeps its source port (see pf_get_sport()). The new
+		 * destination port means a new CRC32c: pf_sctp_cksum_fixup().
+		 */
+		if (pd->proto == IPPROTO_SCTP)
+			break;
 
 		/*
 		 * Do we have a source port conflict in the stack state?  Try to
