@@ -978,6 +978,18 @@ Same, for subjects and objects owned by a different gid.
 .It Va security.bsd.see_jail_proc
 Same, for subjects and objects belonging to a different jail, including
 sub-jails.
+.It Va security.bsd.see_vnet_sockets
+When enabled, jails that share a network stack of their own (a
+.Va vnet
+jail and the jails below it that inherit its
+.Va vnet )
+may see each other's sockets, for example in
+.Xr netstat 1
+and
+.Xr sockstat 1 ,
+as processes sharing a network namespace do on Linux.
+Jails on the host's network stack are never affected.
+Off by default.
 .It Va security.bsd.conservative_signals
 When enabled, unprivileged users are only allowed to send job control
 and usual termination signals like
