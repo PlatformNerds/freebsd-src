@@ -52,6 +52,7 @@ In
 .Xr sysctl.conf 5 :
 .Cd net.pf.request_maxcount
 .Cd net.pf.filter_local
+.Cd net.pf.sctp_rdr_ports
 .Sh DESCRIPTION
 Packet filtering takes place in the kernel.
 A pseudo-device,
@@ -107,6 +108,11 @@ to also filter on the loopback output hook.
 This is typically used to allow redirect rules to adjust the source address.
 .It Va net.pf.request_maxcount
 The maximum number of items in a single ioctl call.
+.It Va net.pf.sctp_rdr_ports
+Allow rdr rules to change the destination port of SCTP connections.
+The SCTP checksum is recomputed for each translated packet.
+Off by default: the peer of a multihomed association would reach the
+association's other addresses on the original port.
 .El
 .Sh LOADER TUNABLES
 The following tunables can be entered at the
