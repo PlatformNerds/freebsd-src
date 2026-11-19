@@ -332,8 +332,27 @@ main(int argc, char *argv[])
 					if (*p || num <= 0)
 						errx(1, "illegal maxgroups value -- %s", val);
 					//set_rpc_maxgrouplist(num);
-				} else if (strcmp(opt, "vers") == 0) {
+				} else if (strcmp(opt, "vers") == 0 ||
+				    strcmp(opt, "nfsvers") == 0) {
+					/*
+					 * Linux also takes "nfsvers" and a
+					 * minor version: "vers=4.1" is
+					 * "vers=4,minorversion=1".
+					 */
 					num = strtol(val, &p, 10);
+					if (num == 4 && *p == '.') {
+						char *q;
+						long minor;
+
+						minor = strtol(p + 1, &q, 10);
+						if (q == p + 1 || *q || minor < 0)
+							errx(1, "illegal vers value "
+							    "-- %s", val);
+						build_iovec(&iov, &iovlen,
+						    "minorversion",
+						    strdup(p + 1), (size_t)-1);
+						p = q;
+					}
 					if (*p || num <= 0)
 						errx(1, "illegal vers value -- "
 						    "%s", val);
