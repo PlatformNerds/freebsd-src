@@ -2003,6 +2003,32 @@ SYSCTL_INT(_security_bsd, OID_AUTO, see_jail_proc, CTLFLAG_RW,
     &see_jail_proc, 0,
     "Unprivileged processes may see subjects/objects with different jail ids");
 
+/*
+ * 'see_vnet_sockets' lets jails that share a network stack of their own (a
+ * vnet jail and the jails below it that inherit its vnet) see each other's
+ * sockets, as processes in one network namespace do on Linux: the containers
+ * of a pod run in sibling jails sharing the pod jail's vnet, and tools like
+ * netstat in one of them otherwise miss the others' listeners. Jails on the
+ * host's network stack never qualify.
+ */
+static int	see_vnet_sockets = 0;
+SYSCTL_INT(_security_bsd, OID_AUTO, see_vnet_sockets, CTLFLAG_RW,
+    &see_vnet_sockets, 0,
+    "Jails sharing a vnet of their own may see each other's sockets");
+
+/*
+ * Determine whether u1 may see sockets of u2 because both are in the same
+ * jail-owned vnet, according to the 'see_vnet_sockets' policy.
+ */
+bool
+cr_seevnetpeer(struct ucred *u1, struct ucred *u2)
+{
+	struct prison *p1 = u1->cr_prison, *p2 = u2->cr_prison;
+
+	return (see_vnet_sockets && p1->pr_vnet == p2->pr_vnet &&
+	    p1->pr_vnet != prison0.pr_vnet);
+}
+
 /*-
  * Determine if u1 "can see" the subject specified by u2, according to the
  * 'see_jail_proc' policy.
@@ -2486,7 +2512,7 @@ cr_canseesocket(struct ucred *cred, struct socket *so)
 	int error;
 
 	error = prison_check(cred, so->so_cred);
-	if (error)
+	if (error && !cr_seevnetpeer(cred, so->so_cred))
 		return (ENOENT);
 #ifdef MAC
 	error = mac_socket_check_visible(cred, so);

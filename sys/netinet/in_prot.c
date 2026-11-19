@@ -55,7 +55,7 @@ cr_canseeinpcb(struct ucred *cred, struct inpcb *inp)
 	int error;
 
 	error = prison_check(cred, inp->inp_cred);
-	if (error)
+	if (error && !cr_seevnetpeer(cred, inp->inp_cred))
 		return (ENOENT);
 #ifdef MAC
 	INP_LOCK_ASSERT(inp);
