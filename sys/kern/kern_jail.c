@@ -4161,11 +4161,13 @@ prison_check(struct ucred *cred1, struct ucred *cred2)
  * - The prison's enforce_statfs cannot be 0, so that
  *   mountd(8) can do exports.
  */
+static bool	prison_nfsd_inherited_vnet(struct ucred *cred);
+
 bool
 prison_check_nfsd(struct ucred *cred)
 {
 
-	if (jailed_without_vnet(cred))
+	if (jailed_without_vnet(cred) && !prison_nfsd_inherited_vnet(cred))
 		return (false);
 	if (!prison_allow(cred, PR_ALLOW_NFSD))
 		return (false);
@@ -4400,6 +4402,30 @@ prison_enforce_statfs(struct ucred *cred, struct mount *mp, struct statfs *sp)
 }
 
 /*
+ * 'nfsd_inherited_vnet' also lets a jail run nfsd(8) and mountd(8) in a
+ * network stack it inherits from a jail ancestor (vnet=inherit below a vnet
+ * jail), as when a privileged container of a pod serves NFS: the containers
+ * of a pod are sibling jails sharing the pod jail's vnet. The NFS server's
+ * state is per vnet, so such a jail is still isolated from the host's NFS
+ * server. A jail on the host's network stack never qualifies.
+ */
+static int	nfsd_inherited_vnet = 0;
+SYSCTL_INT(_security_jail, OID_AUTO, nfsd_inherited_vnet, CTLFLAG_RW,
+    &nfsd_inherited_vnet, 0,
+    "Jails with allow.nfsd may run nfsd in a vnet inherited from a jail");
+
+static bool
+prison_nfsd_inherited_vnet(struct ucred *cred)
+{
+#ifdef VIMAGE
+	return (nfsd_inherited_vnet != 0 &&
+	    cred->cr_prison->pr_vnet != prison0.pr_vnet);
+#else
+	return (false);
+#endif
+}
+
+/*
  * Check with permission for a specific privilege is granted within jail.  We
  * have a specific list of accepted privileges; the rest are denied.
  */
@@ -4438,6 +4464,7 @@ prison_priv_check(struct ucred *cred, int priv)
 	case PRIV_VFS_MOUNT_EXPORTED:
 		if (!prison_check_nfsd(cred))
 			return (EPERM);
+		return (0);
 #ifdef notyet
 	case PRIV_NFS_LOCKD:
 #endif
