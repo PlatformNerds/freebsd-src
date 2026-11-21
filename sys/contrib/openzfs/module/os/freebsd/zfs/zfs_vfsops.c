@@ -497,7 +497,17 @@ atime_changed_cb(void *arg, uint64_t newval)
 static void
 relatime_changed_cb(void *arg, uint64_t newval)
 {
-	((zfsvfs_t *)arg)->z_relatime = (newval != 0);
+	zfsvfs_t *zfsvfs = arg;
+
+	zfsvfs->z_relatime = (newval != 0);
+	/* Recorded for the mount table, as atime is. */
+	if (newval != 0) {
+		vfs_clearmntopt(zfsvfs->z_vfs, "norelatime");
+		vfs_setmntopt(zfsvfs->z_vfs, "relatime", NULL, 0);
+	} else {
+		vfs_clearmntopt(zfsvfs->z_vfs, "relatime");
+		vfs_setmntopt(zfsvfs->z_vfs, "norelatime", NULL, 0);
+	}
 }
 
 static void

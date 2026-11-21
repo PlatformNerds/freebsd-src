@@ -97,6 +97,8 @@
 
 #include <machine/clock.h>
 
+#include <fs/nullfs/null.h>
+
 #include <geom/geom.h>
 #include <geom/geom_int.h>
 
@@ -482,10 +484,133 @@ _mtab_helper(const struct pfs_node *pn, const struct statfs *sp,
 	return (0);
 }
 
+/*
+ * Options of a mount that Linux shows in its mount table and FreeBSD keeps
+ * only in the mount's option list: relatime (set by ZFS from its property)
+ * and the NFS client's options.
+ */
+struct mtab_opts {
+	bool	relatime;
+	bool	nfs;
+	int	nfsvers;
+	char	minorversion[8];
+	bool	soft;
+	bool	udp;
+	char	rsize[12];
+	char	wsize[12];
+	char	timeo[12];
+	char	retrans[12];
+};
+
 static void
-_sbuf_mntoptions_helper(struct sbuf *sb, uint64_t f_flags)
+_mtab_optval(const struct vfsopt *opt, char *buf, size_t size)
+{
+	if (opt->value != NULL && opt->len > 1 &&
+	    ((const char *)opt->value)[opt->len - 1] == '\0')
+		strlcpy(buf, opt->value, size);
+}
+
+/* Called with the mount interlock held. */
+static void
+_mtab_getopts(struct mount *mp, struct mtab_opts *mo)
+{
+	struct vfsopt *opt;
+
+	mtx_assert(MNT_MTX(mp), MA_OWNED);
+	mo->nfs = strcmp(mp->mnt_stat.f_fstypename, "nfs") == 0;
+	if (mp->mnt_opt == NULL)
+		return;
+	TAILQ_FOREACH(opt, mp->mnt_opt, link) {
+		if (strcmp(opt->name, "relatime") == 0)
+			mo->relatime = true;
+		else if (strcmp(opt->name, "norelatime") == 0)
+			mo->relatime = false;
+		if (!mo->nfs)
+			continue;
+		if (strcmp(opt->name, "nfsv2") == 0)
+			mo->nfsvers = 2;
+		else if (strcmp(opt->name, "nfsv3") == 0)
+			mo->nfsvers = 3;
+		else if (strcmp(opt->name, "nfsv4") == 0)
+			mo->nfsvers = 4;
+		else if (strcmp(opt->name, "minorversion") == 0)
+			_mtab_optval(opt, mo->minorversion,
+			    sizeof(mo->minorversion));
+		else if (strcmp(opt->name, "soft") == 0)
+			mo->soft = true;
+		else if (strcmp(opt->name, "udp") == 0 ||
+		    strcmp(opt->name, "mntudp") == 0)
+			mo->udp = true;
+		else if (strcmp(opt->name, "rsize") == 0)
+			_mtab_optval(opt, mo->rsize, sizeof(mo->rsize));
+		else if (strcmp(opt->name, "wsize") == 0)
+			_mtab_optval(opt, mo->wsize, sizeof(mo->wsize));
+		else if (strcmp(opt->name, "timeo") == 0 ||
+		    strcmp(opt->name, "timeout") == 0)
+			_mtab_optval(opt, mo->timeo, sizeof(mo->timeo));
+		else if (strcmp(opt->name, "retrans") == 0)
+			_mtab_optval(opt, mo->retrans, sizeof(mo->retrans));
+	}
+}
+
+/*
+ * nullfs is FreeBSD's bind mount. Linux describes a bind mount by the
+ * filesystem behind it: its source, type and options, with the bind
+ * mount's own flags. Describe a nullfs mount (also one on another nullfs
+ * mount) the same way, from the mount below it: e.g. a Kubernetes volume,
+ * which the container runtime mounts into the jail with nullfs. Also
+ * collect the options of the mount that Linux would show.
+ */
+static void
+_mtab_lower(struct statfs *sp, struct mtab_opts *mo)
+{
+	struct mount *mp, *lmp;
+
+	memset(mo, 0, sizeof(*mo));
+	/* Never wait: e.g. for the unmount of a dead NFS server's mount. */
+	mp = vfs_getvfs(&sp->f_fsid);
+	if (mp == NULL)
+		return;
+	lmp = mp;
+	if (vfs_busy(lmp, MBF_NOWAIT) != 0)
+		mp = NULL;
+	vfs_rel(lmp);
+	while (mp != NULL && strcmp(mp->mnt_vfc->vfc_name, "nullfs") == 0) {
+		lmp = vfs_ref_from_vp(MOUNTTONULLMOUNT(mp)->nullm_lowerrootvp);
+		vfs_unbusy(mp);
+		mp = NULL;
+		if (lmp == NULL)
+			break;
+		if (vfs_busy(lmp, MBF_NOWAIT) == 0)
+			mp = lmp;
+		vfs_rel(lmp);
+		if (mp == NULL)
+			break;
+		strlcpy(sp->f_mntfromname, mp->mnt_stat.f_mntfromname,
+		    sizeof(sp->f_mntfromname));
+		strlcpy(sp->f_fstypename, mp->mnt_stat.f_fstypename,
+		    sizeof(sp->f_fstypename));
+		sp->f_flags |= mp->mnt_flag & (MNT_RDONLY | MNT_NOATIME);
+	}
+	if (mp == NULL)
+		return;
+	MNT_ILOCK(mp);
+	_mtab_getopts(mp, mo);
+	MNT_IUNLOCK(mp);
+	vfs_unbusy(mp);
+}
+
+/* What of a mount's options to show: its own flags, its filesystem's. */
+#define	MTAB_MNT	0x1
+#define	MTAB_FS		0x2
+
+static void
+_sbuf_mntoptions_helper(struct sbuf *sb, uint64_t f_flags,
+    const struct mtab_opts *mo, int what)
 {
 	sbuf_cat(sb, (f_flags & MNT_RDONLY) ? "ro" : "rw");
+	if ((what & MTAB_MNT) == 0)
+		goto fs;
 #define ADD_OPTION(opt, name) \
 	if (f_flags & (opt)) sbuf_cat(sb, "," name);
 	ADD_OPTION(MNT_SYNCHRONOUS,	"sync");
@@ -497,6 +622,28 @@ _sbuf_mntoptions_helper(struct sbuf *sb, uint64_t f_flags)
 	ADD_OPTION(MNT_NOSYMFOLLOW,	"nosymfollow");
 	ADD_OPTION(MNT_NOATIME,		"noatime");
 #undef ADD_OPTION
+	if (mo->relatime && (f_flags & MNT_NOATIME) == 0)
+		sbuf_cat(sb, ",relatime");
+fs:
+	if ((what & MTAB_FS) == 0 || !mo->nfs)
+		return;
+	/* In Linux's order; mount_nfs(8) defaults to NFSv3 over TCP. */
+	if (mo->nfsvers == 4)
+		sbuf_printf(sb, ",vers=4.%s",
+		    mo->minorversion[0] != '\0' ? mo->minorversion : "0");
+	else
+		sbuf_printf(sb, ",vers=%d", mo->nfsvers != 0 ? mo->nfsvers : 3);
+	if (mo->rsize[0] != '\0')
+		sbuf_printf(sb, ",rsize=%s", mo->rsize);
+	if (mo->wsize[0] != '\0')
+		sbuf_printf(sb, ",wsize=%s", mo->wsize);
+	sbuf_cat(sb, mo->soft ? ",soft" : ",hard");
+	sbuf_cat(sb, mo->udp && mo->nfsvers != 4 ? ",proto=udp" :
+	    ",proto=tcp");
+	if (mo->timeo[0] != '\0')
+		sbuf_printf(sb, ",timeo=%s", mo->timeo);
+	if (mo->retrans[0] != '\0')
+		sbuf_printf(sb, ",retrans=%s", mo->retrans);
 }
 
 /*
@@ -509,6 +656,7 @@ static int
 linprocfs_domtab(PFS_FILL_ARGS)
 {
 	const char *mntto, *mntfrom, *fstype;
+	struct mtab_opts mo;
 	char *dlep, *flep;
 	struct vnode *vp;
 	struct pwd *pwd;
@@ -530,13 +678,18 @@ linprocfs_domtab(PFS_FILL_ARGS)
 	lep_len = strlen(dlep);
 
 	buf = NULL;
+	/*
+	 * MNT_NOWAIT: the table needs no statistics, and a filesystem that
+	 * can't answer (an NFS mount of a dead server) must not hang it.
+	 */
 	error = kern_getfsstat(td, &buf, SIZE_T_MAX, &count,
-	    UIO_SYSSPACE, MNT_WAIT);
+	    UIO_SYSSPACE, MNT_NOWAIT);
 	if (error != 0) {
 		goto out;
 	}
 
 	for (sp = buf; count > 0; sp++, count--) {
+		_mtab_lower(sp, &mo);
 		error = _mtab_helper(pn, sp, &mntfrom, &mntto, &fstype);
 		if (error != 0) {
 			MPASS(error == ECANCELED);
@@ -548,8 +701,8 @@ linprocfs_domtab(PFS_FILL_ARGS)
 			mntto += lep_len;
 
 		sbuf_printf(sb, "%s %s %s ", mntfrom, mntto, fstype);
-		_sbuf_mntoptions_helper(sb, sp->f_flags);
-		/* a real Linux mtab will also show NFS options */
+		_sbuf_mntoptions_helper(sb, sp->f_flags, &mo,
+		    MTAB_MNT | MTAB_FS);
 		sbuf_printf(sb, " 0 0\n");
 	}
 
@@ -564,6 +717,7 @@ static int
 linprocfs_doprocmountinfo(PFS_FILL_ARGS)
 {
 	const char *mntfrom, *mntto, *fstype;
+	struct mtab_opts mo;
 	char *dlep, *flep;
 	struct statfs *buf, *sp;
 	size_t count, lep_len;
@@ -584,12 +738,17 @@ linprocfs_doprocmountinfo(PFS_FILL_ARGS)
 	lep_len = strlen(dlep);
 
 	buf = NULL;
+	/*
+	 * MNT_NOWAIT: the table needs no statistics, and a filesystem that
+	 * can't answer (an NFS mount of a dead server) must not hang it.
+	 */
 	error = kern_getfsstat(td, &buf, SIZE_T_MAX, &count,
-	    UIO_SYSSPACE, MNT_WAIT);
+	    UIO_SYSSPACE, MNT_NOWAIT);
 	if (error != 0)
 		goto out;
 
 	for (sp = buf; count > 0; sp++, count--) {
+		_mtab_lower(sp, &mo);
 		error = _mtab_helper(pn, sp, &mntfrom, &mntto, &fstype);
 		if (error != 0) {
 			MPASS(error == ECANCELED);
@@ -623,7 +782,7 @@ linprocfs_doprocmountinfo(PFS_FILL_ARGS)
 		sbuf_printf(sb, "%u 0 0:0 / %s ",
 		    sp->f_fsid.val[0] ^ sp->f_fsid.val[1], mntto);
 		/* (6) mount options */
-		_sbuf_mntoptions_helper(sb, sp->f_flags);
+		_sbuf_mntoptions_helper(sb, sp->f_flags, &mo, MTAB_MNT);
 		/*
 		 * (7) zero or more optional fields -- again, namespace related
 		 *
@@ -636,8 +795,9 @@ linprocfs_doprocmountinfo(PFS_FILL_ARGS)
 		 * (11) "superblock" options -- like (6), but different
 		 * semantics in Linux
 		 */
-		sbuf_printf(sb, " - %s %s %s\n", fstype, mntfrom,
-		    (sp->f_flags & MNT_RDONLY) ? "ro" : "rw");
+		sbuf_printf(sb, " - %s %s ", fstype, mntfrom);
+		_sbuf_mntoptions_helper(sb, sp->f_flags, &mo, MTAB_FS);
+		sbuf_cat(sb, "\n");
 	}
 
 	error = 0;
