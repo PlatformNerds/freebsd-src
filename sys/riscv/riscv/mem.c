@@ -48,8 +48,6 @@ memrw(struct cdev *dev, struct uio *uio, int flags)
 	ssize_t orig_resid;
 	vm_offset_t off, v;
 	struct iovec *iov;
-	struct vm_page m;
-	vm_page_t marr;
 	vm_prot_t prot;
 	u_int cnt;
 	int error;
@@ -109,10 +107,12 @@ memrw(struct cdev *dev, struct uio *uio, int flags)
 				break;
 			}
 
-			/* Have uiomove_fromphys handle the data */
-			m.phys_addr = trunc_page(v);
-			marr = &m;
-			uiomove_fromphys(&marr, off, cnt, uio);
+			/*
+			 * The DMAP covers all of RAM.  Anything else is a hole
+			 * or device memory, which pmap_map_io_transient() can't
+			 * map (it panics), so fail the access instead.
+			 */
+			error = EFAULT;
 			break;
 		}
 	}
