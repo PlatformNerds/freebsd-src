@@ -1267,6 +1267,13 @@ devfs_mknod(struct vop_mknod_args *ap)
 	 */
 	if (ap->a_vap->va_type != VCHR)
 		return (EOPNOTSUPP);
+	/*
+	 * mknod(2) here brings back a node that was removed or that a
+	 * devfs ruleset hides (DE_WHITEOUT).  A jail must not undo its
+	 * ruleset, even with allow.mknod.
+	 */
+	if (jailed(ap->a_cnp->cn_cred))
+		return (EPERM);
 	dvp = ap->a_dvp;
 	dmp = VFSTODEVFS(dvp->v_mount);
 

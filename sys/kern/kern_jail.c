@@ -258,6 +258,7 @@ static struct bool_flags pr_flag_allow[NBBY * NBPW] = {
 	{JAIL_PARAM_ALLOW_ROUTING, JAIL_PARAM_ALLOW_NOROUTING,
 	 PR_ALLOW_ROUTING},
 	{JAIL_PARAM_ALLOW_PF, JAIL_PARAM_ALLOW_NOPF, PR_ALLOW_PF},
+	{JAIL_PARAM_ALLOW_MKNOD, JAIL_PARAM_ALLOW_NOMKNOD, PR_ALLOW_MKNOD},
 	{JAIL_PARAM_ALLOW_UNPRIV_PARENT_TAMPER,
 	    JAIL_PARAM_ALLOW_NOUNPRIV_PARENT_TAMPER,
 	    PR_ALLOW_UNPRIV_PARENT_TAMPER},
@@ -4840,6 +4841,17 @@ prison_priv_check(struct ucred *cred, int priv)
 			return (0);
 		return (EPERM);
 
+		/*
+		 * Device nodes outside devfs are inert: a device is reached
+		 * only through devfs, which refuses mknod(2) from a jail.
+		 * With allow.mknod a jail may create them, e.g. for software
+		 * that expects to (a privileged Linux container can).
+		 */
+	case PRIV_VFS_MKNOD_DEV:
+		if (cred->cr_prison->pr_allow & PR_ALLOW_MKNOD)
+			return (0);
+		return (EPERM);
+
 	case PRIV_VMM_CREATE:
 	case PRIV_VMM_DESTROY:
 		/*
@@ -5340,6 +5352,8 @@ SYSCTL_JAIL_PARAM(_allow, routing, CTLTYPE_INT | CTLFLAG_RW,
     "B", "Jail may modify routing table");
 SYSCTL_JAIL_PARAM(_allow, pf, CTLTYPE_INT | CTLFLAG_RW,
     "B", "Jail may manage the pf firewall without its own vnet");
+SYSCTL_JAIL_PARAM(_allow, mknod, CTLTYPE_INT | CTLFLAG_RW,
+    "B", "Jail may create device nodes outside devfs");
 #ifdef AUDIT
 SYSCTL_JAIL_PARAM(_allow, setaudit, CTLTYPE_INT | CTLFLAG_RW,
     "B", "Jail may set and get audit session state");

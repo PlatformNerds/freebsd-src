@@ -739,6 +739,17 @@ firewall, for example with
 A VNET jail always manages its own
 .Xr pf 4
 instance and does not need this permission.
+.It Va allow.mknod
+Allow privileged processes in the jail to create character and block
+device nodes with
+.Xr mknod 2
+outside
+.Xr devfs 4 .
+Such nodes give no access to devices, which are reached only through
+.Xr devfs 4 ;
+creating or restoring nodes in a
+.Xr devfs 4
+mount is never allowed in a jail.
 .It Va allow.setaudit
 Allow privileged processes in the jail to set
 .Xr audit 4
