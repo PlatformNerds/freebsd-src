@@ -525,6 +525,15 @@ null_open(struct vop_open_args *ap)
 	struct vnode *vp, *ldvp;
 
 	vp = ap->a_vp;
+	/*
+	 * Devices are reached only through devfs, whose ruleset decides
+	 * which ones a jail sees.  Through nullfs, read(2) and write(2)
+	 * on a device already fail (the file gets vnops, not devfs's
+	 * fileops), but the driver's open and ioctl routines would
+	 * still run, past that ruleset.  Refuse the open.
+	 */
+	if (vp->v_type == VCHR)
+		return (ENXIO);
 	ldvp = NULLVPTOLOWERVP(vp);
 	retval = null_bypass(&ap->a_gen);
 	if (retval == 0) {
