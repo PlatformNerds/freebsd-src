@@ -44,10 +44,24 @@
 
 MALLOC_DECLARE(M_MOUNT);
 
+/*
+ * The option list to record a mount option in. While the file system is
+ * being mounted or updated, that is mnt_optnew: the kernel replaces
+ * mnt_opt with it when VFS_MOUNT() returns, so options recorded in mnt_opt
+ * by the property callbacks during the mount were lost (all of them on a
+ * first mount).
+ */
+static struct vfsoptlist **
+vfs_mntoptlist(vfs_t *vfsp)
+{
+	return (vfsp->mnt_optnew != NULL ? &vfsp->mnt_optnew : &vfsp->mnt_opt);
+}
+
 void
 vfs_setmntopt(vfs_t *vfsp, const char *name, const char *arg,
     int flags __unused)
 {
+	struct vfsoptlist **optsp;
 	struct vfsopt *opt;
 	size_t namesize;
 	int locked;
@@ -55,15 +69,17 @@ vfs_setmntopt(vfs_t *vfsp, const char *name, const char *arg,
 	if (!(locked = mtx_owned(MNT_MTX(vfsp))))
 		MNT_ILOCK(vfsp);
 
-	if (vfsp->mnt_opt == NULL) {
+	optsp = vfs_mntoptlist(vfsp);
+	if (*optsp == NULL) {
 		void *opts;
 
 		MNT_IUNLOCK(vfsp);
-		opts = malloc(sizeof (*vfsp->mnt_opt), M_MOUNT, M_WAITOK);
+		opts = malloc(sizeof (**optsp), M_MOUNT, M_WAITOK);
 		MNT_ILOCK(vfsp);
-		if (vfsp->mnt_opt == NULL) {
-			vfsp->mnt_opt = opts;
-			TAILQ_INIT(vfsp->mnt_opt);
+		optsp = vfs_mntoptlist(vfsp);
+		if (*optsp == NULL) {
+			*optsp = opts;
+			TAILQ_INIT(*optsp);
 		} else {
 			free(opts, M_MOUNT);
 		}
@@ -87,7 +103,7 @@ vfs_setmntopt(vfs_t *vfsp, const char *name, const char *arg,
 	}
 
 	MNT_ILOCK(vfsp);
-	TAILQ_INSERT_TAIL(vfsp->mnt_opt, opt, link);
+	TAILQ_INSERT_TAIL(*vfs_mntoptlist(vfsp), opt, link);
 	if (!locked)
 		MNT_IUNLOCK(vfsp);
 }
@@ -99,7 +115,7 @@ vfs_clearmntopt(vfs_t *vfsp, const char *name)
 
 	if (!(locked = mtx_owned(MNT_MTX(vfsp))))
 		MNT_ILOCK(vfsp);
-	vfs_deleteopt(vfsp->mnt_opt, name);
+	vfs_deleteopt(*vfs_mntoptlist(vfsp), name);
 	if (!locked)
 		MNT_IUNLOCK(vfsp);
 }
