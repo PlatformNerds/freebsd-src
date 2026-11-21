@@ -273,6 +273,7 @@ struct prison_racct {
 #define	PR_ALLOW_UNPRIV_PARENT_TAMPER	0x00400000
 #define	PR_ALLOW_SETAUDIT		0x00800000
 #define	PR_ALLOW_PF			0x01000000
+#define	PR_ALLOW_MKNOD			0x02000000
 
 /*
  * PR_ALLOW_PRISON0 are the allow flags that we apply by default to prison0,
@@ -280,7 +281,7 @@ struct prison_racct {
  * build time.  PR_ALLOW_ALL_STATIC should contain any bit above that we expect
  * to be used on the system, while PR_ALLOW_PRISON0 will be some subset of that.
  */
-#define	PR_ALLOW_ALL_STATIC		0x01ff87ff
+#define	PR_ALLOW_ALL_STATIC		0x03ff87ff
 #define	PR_ALLOW_PRISON0		\
     (PR_ALLOW_ALL_STATIC & ~(PR_ALLOW_UNPRIV_PARENT_TAMPER))
 
