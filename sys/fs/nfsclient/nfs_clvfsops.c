@@ -797,7 +797,15 @@ nfs_decode_args(struct mount *mp, struct nfsmount *nmp, struct nfs_args *argp,
 	}
 }
 
+/*
+ * "relatime", "strictatime", "lazytime" and "[no]diratime" are Linux's
+ * access time modes, accepted (and kept in the mount's options) for mount
+ * options written for Linux, e.g. in Kubernetes PersistentVolumes. The
+ * server keeps an NFS file's access time, so they ask nothing of the
+ * client, as on Linux.
+ */
 static const char *nfs_opts[] = { "from", "nfs_args",
+    "relatime", "strictatime", "lazytime", "diratime",
     "noac", "noatime", "noexec", "suiddir", "nosuid", "nosymfollow", "union",
     "noclusterr", "noclusterw", "multilabel", "acls", "force", "update",
     "async", "noconn", "nolockd", "conn", "lockd", "intr", "rdirplus",
