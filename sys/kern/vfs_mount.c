@@ -396,6 +396,25 @@ bad:
 }
 
 /*
+ * Make the options of an update of a mounted file system its options.
+ * Under the mount interlock: code that reads mnt_opt with it held (ZFS's
+ * vfs_setmntopt(), linprocfs' mount table) must not see the old list
+ * freed.
+ */
+static void
+vfs_swapopts(struct mount *mp)
+{
+	struct vfsoptlist *old;
+
+	MNT_ILOCK(mp);
+	old = mp->mnt_opt;
+	mp->mnt_opt = mp->mnt_optnew;
+	MNT_IUNLOCK(mp);
+	if (old != NULL)
+		vfs_freeopts(old);
+}
+
+/*
  * Merge the old mount options with the new ones passed
  * in the MNT_UPDATE case.
  *
@@ -1597,9 +1616,7 @@ vfs_domount_update(
 		goto end;
 
 	mount_devctl_event("REMOUNT", mp, true);
-	if (mp->mnt_opt != NULL)
-		vfs_freeopts(mp->mnt_opt);
-	mp->mnt_opt = mp->mnt_optnew;
+	vfs_swapopts(mp);
 	*optlist = NULL;
 	(void)VFS_STATFS(mp, &mp->mnt_stat);
 	/*
@@ -3193,9 +3210,7 @@ vfs_remount_ro(struct mount *mp)
 		mp->mnt_flag &= ~(MNT_UPDATE | MNT_FORCE);
 		MNT_IUNLOCK(mp);
 		vfs_deallocate_syncvnode(mp);
-		if (mp->mnt_opt != NULL)
-			vfs_freeopts(mp->mnt_opt);
-		mp->mnt_opt = mp->mnt_optnew;
+		vfs_swapopts(mp);
 	} else {
 		MNT_ILOCK(mp);
 		mp->mnt_flag &= ~(MNT_UPDATE | MNT_FORCE | MNT_RDONLY);
