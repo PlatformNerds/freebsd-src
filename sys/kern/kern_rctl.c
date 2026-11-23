@@ -1602,6 +1602,16 @@ rctl_racct_to_sbuf(struct racct *racct, int sloppy)
 			amount /= 1000000;
 		sbuf_printf(sb, "%s=%jd,", rctl_resource_name(i), amount);
 	}
+	/*
+	 * cputime is shown in whole seconds.  Also show the CPU time the
+	 * kernel keeps, in microseconds, for consumers measuring CPU usage
+	 * over short windows (a container's CPU usage measured over 15
+	 * seconds moves in steps of 1/15 of a CPU otherwise).
+	 */
+	RACCT_LOCK();
+	amount = racct->r_resources[RACCT_CPU];
+	RACCT_UNLOCK();
+	sbuf_printf(sb, "cputime_us=%jd,", amount);
 	sbuf_setpos(sb, sbuf_len(sb) - 1);
 	return (sb);
 }
