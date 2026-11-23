@@ -120,6 +120,13 @@
 #include <security/mac/mac_framework.h>
 
 SDT_PROVIDER_DEFINE(pf);
+
+/*
+ * sticky-address records the redirect target, not the source, for outbound
+ * rdr-to rules, so a host's own connections to a redirected address can be
+ * kept on one target (e.g. Kubernetes sessionAffinity for host clients).
+ */
+FEATURE(pf_rdr_out_sticky, "pf sticky-address works with outbound rdr-to");
 SDT_PROBE_DEFINE2(pf, , test, reason_set, "int", "int");
 SDT_PROBE_DEFINE4(pf, ip, test, done, "int", "int", "struct pf_krule *",
     "struct pf_kstate *");
