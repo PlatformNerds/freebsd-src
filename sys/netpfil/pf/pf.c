@@ -12031,6 +12031,14 @@ done:
 	    in_localip(pd.src->v4) && in_localip(pd.dst->v4))
 		pd.m->m_flags |= M_FASTFWD_OURS;
 #endif
+#ifdef INET6
+	/* The same for IPv6 (ip6_input()'s net.inet6.ip6.source_address_validation). */
+	if (dir == PF_IN && action == PF_PASS && af == AF_INET6 && s != NULL &&
+	    s->direction == PF_OUT &&
+	    s->key[PF_SK_WIRE] != s->key[PF_SK_STACK] &&
+	    in6_localip(&pd.src->v6) && in6_localip(&pd.dst->v6))
+		pd.m->m_flags |= M_FASTFWD_OURS;
+#endif
 
 	if (action == PF_PASS && r->divert.port && !PACKET_LOOPED(&pd)) {
 		mtag = m_tag_alloc(MTAG_PF_DIVERT, 0,
