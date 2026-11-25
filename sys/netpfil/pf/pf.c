@@ -585,6 +585,84 @@ pf_sctp_cksum_fixup(struct pf_pdesc *pd)
 	pf_sctp_checksum(pd->m, pd->off);
 }
 
+/*
+ * SCTP multi-homing through a translation. An endpoint lists its addresses in
+ * the INIT or INIT ACK chunk, and its peer then also uses those as paths of the
+ * association. Through a rdr or nat they are wrong: they are the endpoint's
+ * real addresses, which the peer does not know it is talking to, and packets
+ * sent there bypass the translation (a Kubernetes Service in front of a
+ * dual-stack pod: the client's first HEARTBEAT goes to the pod's own address
+ * and the Service port, the pod answers ABORT, the association dies).
+ *
+ * With net.pf.sctp_nat_single_homed set, pf hides the IPv4 and IPv6 Address
+ * parameters of INIT and INIT ACK chunks it translates, by rewriting their type
+ * to an unassigned one whose two high bits are 10: "skip this parameter and
+ * continue processing" (RFC 9260, section 3.2.1). The peer then sees a
+ * single-homed endpoint, which is what the translation can carry. The
+ * parameter lengths stay the same, so the packet is not resized; only the
+ * checksum needs recomputing.
+ */
+VNET_DEFINE_STATIC(int, pf_sctp_nat_single_homed) = 0;
+#define	V_pf_sctp_nat_single_homed	VNET(pf_sctp_nat_single_homed)
+SYSCTL_INT(_net_pf, OID_AUTO, sctp_nat_single_homed, CTLFLAG_VNET | CTLFLAG_RW,
+    &VNET_NAME(pf_sctp_nat_single_homed), 0,
+    "Hide the addresses SCTP endpoints list in INIT and INIT ACK chunks that "
+    "pf translates, so that associations through rdr/nat stay single-homed");
+
+#define	PF_SCTP_HIDDEN_ADDRESS	0xbf00	/* unassigned, "skip" (10xx xxxx) */
+
+static void
+pf_sctp_hide_addresses(struct pf_pdesc *pd)
+{
+	struct sctp_chunkhdr	 ch;
+	struct sctp_paramhdr	 h;
+	int			 off, end, p, pend;
+	uint16_t		 clen, plen, type;
+	bool			 changed = false;
+
+	if (!V_pf_sctp_nat_single_homed || pd->proto != IPPROTO_SCTP ||
+	    (pd->sctp_flags & (PFDESC_SCTP_INIT | PFDESC_SCTP_INIT_ACK)) == 0)
+		return;
+
+	end = pd->m->m_pkthdr.len;
+	off = pd->off + sizeof(struct sctphdr);
+	while (off + (int)sizeof(ch) <= end) {
+		if (!pf_pull_hdr(pd->m, off, &ch, sizeof(ch), NULL, NULL,
+		    pd->af))
+			break;
+		clen = ntohs(ch.chunk_length);
+		if (clen < sizeof(ch) || off + clen > end)
+			break;
+		if ((ch.chunk_type == SCTP_INITIATION ||
+		    ch.chunk_type == SCTP_INITIATION_ACK) &&
+		    clen >= sizeof(struct sctp_init_chunk)) {
+			pend = off + clen;
+			p = off + sizeof(struct sctp_init_chunk);
+			while (p + (int)sizeof(h) <= pend) {
+				if (!pf_pull_hdr(pd->m, p, &h, sizeof(h), NULL,
+				    NULL, pd->af))
+					break;
+				plen = ntohs(h.param_length);
+				if (plen < sizeof(h))
+					break;
+				type = ntohs(h.param_type);
+				if (type == SCTP_IPV4_ADDRESS ||
+				    type == SCTP_IPV6_ADDRESS) {
+					h.param_type = htons(PF_SCTP_HIDDEN_ADDRESS |
+					    (type & 0xff));
+					m_copyback(pd->m, p, sizeof(h.param_type),
+					    (caddr_t)&h.param_type);
+					changed = true;
+				}
+				p += roundup(plen, 4);
+			}
+		}
+		off += roundup(clen, 4);
+	}
+	if (changed)
+		pd->sctp_flags |= PFDESC_SCTP_CKSUM;
+}
+
 int
 pf_addr_cmp(struct pf_addr *a, struct pf_addr *b, sa_family_t af)
 {
@@ -6120,6 +6198,7 @@ pf_test_rule(struct pf_krule **rm, struct pf_kstate **sm,
 
 	/* copy back packet headers if we performed NAT operations */
 	if (ctx.rewrite) {
+		pf_sctp_hide_addresses(pd);
 		m_copyback(pd->m, pd->off, pd->hdrlen, pd->hdr.any);
 		pf_sctp_cksum_fixup(pd);
 	}
@@ -7380,6 +7459,7 @@ pf_test_state(struct pf_kstate **state, struct pf_pdesc *pd, u_short *reason)
 	}
 
 	if (copyback && pd->hdrlen > 0) {
+		pf_sctp_hide_addresses(pd);
 		m_copyback(pd->m, pd->off, pd->hdrlen, pd->hdr.any);
 		pf_sctp_cksum_fixup(pd);
 	}
