@@ -648,6 +648,23 @@ pf_sctp_hide_addresses(struct pf_pdesc *pd)
 				type = ntohs(h.param_type);
 				if (type == SCTP_IPV4_ADDRESS ||
 				    type == SCTP_IPV6_ADDRESS) {
+					/*
+					 * Write into a private copy: between jails on
+					 * one host the packet is passed by reference
+					 * (epair, bridge), and the storage may still be
+					 * shared with data the sender keeps, e.g. the
+					 * INIT copy a peer signs into its state cookie.
+					 * Rewriting that in place broke the cookie's
+					 * HMAC, and the association never came up.
+					 */
+					if (!changed) {
+						struct mbuf *m;
+
+						m = m_unshare(pd->m, M_NOWAIT);
+						if (m == NULL)
+							return;
+						pd->m = m;
+					}
 					h.param_type = htons(PF_SCTP_HIDDEN_ADDRESS |
 					    (type & 0xff));
 					m_copyback(pd->m, p, sizeof(h.param_type),
